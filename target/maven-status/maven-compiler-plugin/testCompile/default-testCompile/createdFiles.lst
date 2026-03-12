@@ -1,0 +1,4 @@
+com\ayushman\dns\protocol\DnsPacketParserTest.class
+com\ayushman\dns\protocol\DnsPacketWriterTest.class
+com\ayushman\dns\protocol\TestPackets.class
+com\ayushman\dns\protocol\DnsNameCodecTest.class
