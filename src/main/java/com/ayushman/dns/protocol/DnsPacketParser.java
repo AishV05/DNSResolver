@@ -21,23 +21,31 @@ public class DnsPacketParser {
         List<DnsQuestion> questions = new ArrayList<>();
 
         for (int i = 0; i < header.qdCount(); i++) {
+
             String name = DnsNameCodec.decode(reader, packet);
+
             int type = reader.readU16();
             int qclass = reader.readU16();
-            questions.add(new DnsQuestion(name, type, qclass));
+
+            questions.add(
+                    new DnsQuestion(name, type, qclass)
+            );
         }
 
         List<DnsRecord> answers = new ArrayList<>();
+
         for (int i = 0; i < header.anCount(); i++) {
             answers.add(readRecord(reader, packet));
         }
 
         List<DnsRecord> authorities = new ArrayList<>();
+
         for (int i = 0; i < header.nsCount(); i++) {
             authorities.add(readRecord(reader, packet));
         }
 
         List<DnsRecord> additionals = new ArrayList<>();
+
         for (int i = 0; i < header.arCount(); i++) {
             additionals.add(readRecord(reader, packet));
         }
@@ -51,13 +59,16 @@ public class DnsPacketParser {
         );
     }
 
-    private static DnsRecord readRecord(ByteReader reader, byte[] packet) {
+    private static DnsRecord readRecord(
+        ByteReader reader,
+        byte[] packet
+) {
 
         String name = DnsNameCodec.decode(reader, packet);
-
         int type = reader.readU16();
         int qclass = reader.readU16();
-        int ttl = reader.readU32();
+
+        long ttl = reader.readU32();
 
         int rdLength = reader.readU16();
 
@@ -67,6 +78,14 @@ public class DnsPacketParser {
             rdata[i] = (byte) reader.readU8();
         }
 
-        return new DnsRecord(name, type, qclass, ttl, rdata);
+        return new DnsRecord(
+                name,
+                type,
+                qclass,
+                ttl,
+                rdata
+        );
     }
+
+    
 }

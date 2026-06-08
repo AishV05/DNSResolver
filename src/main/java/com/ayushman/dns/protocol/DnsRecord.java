@@ -4,6 +4,6 @@ public record DnsRecord(
     String name,
     int type,
     int qclass,
-    int ttl,
+    long ttl,
     byte[] rdata
 ){}
