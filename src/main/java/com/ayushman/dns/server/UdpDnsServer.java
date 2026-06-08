@@ -26,7 +26,7 @@ public class UdpDnsServer {
 
         while (true) {
 
-            byte[] buffer = new byte[512];
+            byte[] buffer = new byte[4096];
 
             DatagramPacket requestPacket =
                     new DatagramPacket(buffer, buffer.length);

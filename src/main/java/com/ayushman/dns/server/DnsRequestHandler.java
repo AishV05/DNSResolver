@@ -67,8 +67,7 @@ public class DnsRequestHandler implements Runnable{
 
         } catch (Exception e) {
 
-            System.err.println("Error handling request: "
-                    + e.getMessage());
+            e.printStackTrace();
 
             try {
                 sendServFail();
@@ -101,8 +100,13 @@ public class DnsRequestHandler implements Runnable{
         );
 
         DnsMessage errorResponse =
-                new DnsMessage(header, query.questions(), java.util.List.of());
-
+        new DnsMessage(
+                header,
+                query.questions(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of()
+        );
         byte[] response =
                 DnsPacketWriter.buildResponse(errorResponse);
 

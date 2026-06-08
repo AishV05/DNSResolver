@@ -1,11 +1,13 @@
 package com.ayushman.dns.protocol;
 
 public class ByteReader {
+
     private final byte[] data;
-    private int pos = 0;
+    private int pos;
 
     public ByteReader(byte[] data) {
         this.data = data;
+        this.pos = 0;
     }
 
     public int readU8() {
@@ -16,16 +18,15 @@ public class ByteReader {
         return (readU8() << 8) | readU8();
     }
 
-    public int readU32() {
-        return (readU16() << 16) | readU16();
+    public long readU32() {
+        return ((long) readU16() << 16) | readU16();
     }
 
     public int position() {
         return pos;
     }
 
-    public void position(int newPos) {
-        this.pos = newPos;
+    public void position(int pos) {
+        this.pos = pos;
     }
-
 }

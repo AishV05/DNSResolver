@@ -29,10 +29,12 @@ public class SimpleResolver{
             );
 
             return new DnsMessage(
-                    newHeader,
-                    cached.questions(),
-                    cached.answers()
-            );
+                        newHeader,
+                        cached.questions(),
+                        cached.answers(),
+                        cached.authorities(),
+                        cached.additionals()
+                );
         }
         System.out.println("Cache MISS for " + question.name());
 
@@ -60,10 +62,13 @@ public class SimpleResolver{
         );
 
         DnsMessage responseMessage =
-                new DnsMessage(responseHeader,
-                            query.questions(),
-                            List.of(answer));
-
+        new DnsMessage(
+                responseHeader,
+                query.questions(),
+                List.of(answer),
+                List.of(),
+                List.of()
+        );
         cache.put(question, responseMessage, 300);
 
         return responseMessage;
