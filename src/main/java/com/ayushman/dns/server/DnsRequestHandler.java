@@ -1,5 +1,5 @@
 package com.ayushman.dns.server;
-import java.io.IOException;
+
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 
@@ -7,14 +7,14 @@ import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsPacketParser;
 import com.ayushman.dns.protocol.DnsPacketWriter;
-import com.ayushman.dns.resolver.SimpleResolver;
+import com.ayushman.dns.resolver.RecursiveResolver;
 
 public class DnsRequestHandler implements Runnable{
     private final DatagramPacket requestPacket;
     private final DatagramSocket socket;
-    private final SimpleResolver resolver;
+    private final RecursiveResolver resolver;
 
-    public DnsRequestHandler(DatagramSocket socket, DatagramPacket requestPacket, SimpleResolver resolver){
+    public DnsRequestHandler(DatagramSocket socket, DatagramPacket requestPacket, RecursiveResolver resolver){
         this.socket = socket;
         this.requestPacket = requestPacket;
         this.resolver = resolver;
@@ -65,7 +65,7 @@ public class DnsRequestHandler implements Runnable{
                             + duration + " ms"
             );
 
-        } catch (IOException e) {
+        } catch (Exception e) {
 
             System.err.println("Error handling request: "
                     + e.getMessage());

@@ -16,6 +16,10 @@ public class ByteReader {
         return (readU8() << 8) | readU8();
     }
 
+    public int readU32() {
+        return (readU16() << 16) | readU16();
+    }
+
     public int position() {
         return pos;
     }
@@ -23,4 +27,5 @@ public class ByteReader {
     public void position(int newPos) {
         this.pos = newPos;
     }
+
 }

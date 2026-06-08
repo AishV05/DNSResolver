@@ -5,17 +5,17 @@ import java.net.DatagramSocket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import com.ayushman.dns.resolver.SimpleResolver;
+import com.ayushman.dns.resolver.RecursiveResolver;
 
 public class UdpDnsServer {
 
     private final int port;
-    private final SimpleResolver resolver;
+    private final RecursiveResolver resolver;
     private final ExecutorService threadPool;
 
     public UdpDnsServer(int port) {
         this.port = port;
-        this.resolver = new SimpleResolver();
+        this.resolver = new RecursiveResolver();
         this.threadPool = Executors.newFixedThreadPool(10);
     }
 
