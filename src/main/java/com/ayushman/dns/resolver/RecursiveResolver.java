@@ -2,6 +2,7 @@ package com.ayushman.dns.resolver;
 
 import java.util.List;
 
+import com.ayushman.dns.cache.DnsCache;
 import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsQuestion;
@@ -11,6 +12,9 @@ public class RecursiveResolver {
 
     private final UpstreamDnsClient client =
             new UpstreamDnsClient();
+
+    private final DnsCache cache =
+        new DnsCache();
 
     public DnsMessage resolve(DnsMessage clientQuery)
             throws Exception {
@@ -29,6 +33,23 @@ public class RecursiveResolver {
 
             DnsQuestion question =
                     clientQuery.questions().get(0);
+
+            DnsMessage cached =cache.get(question);
+
+                if (cached != null) {
+
+                System.out.println(
+                        "CACHE HIT: "
+                                + question.name()
+                );
+
+                return cached;
+                }
+
+                System.out.println(
+                        "CACHE MISS: "
+                                + question.name()
+                );
 
             DnsMessage upstreamQuery =
                     ResolverQueryFactory.create(question);
@@ -87,16 +108,29 @@ public class RecursiveResolver {
             // Final answer found
             if (!upstreamResponse.answers().isEmpty()) {
 
+                long ttl =
+                        upstreamResponse
+                                .answers()
+                                .get(0)
+                                .ttl();
+
+                cache.put(
+                        question,
+                        upstreamResponse,
+                        ttl
+                );
+
                 System.out.println(
-                        "Answer count: "
-                                + upstreamResponse.answers().size()
+                        "Stored in cache with TTL="
+                                + ttl
+                                + " seconds"
                 );
 
                 return adaptForClient(
                         clientQuery,
                         upstreamResponse
                 );
-            }
+                }
 
             List<DnsRecord> authorities =
                     upstreamResponse.authorities();
@@ -178,4 +212,6 @@ public class RecursiveResolver {
 
         return null;
     }
+
+    
 }
