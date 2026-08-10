@@ -14,8 +14,22 @@ public class UdpDnsServer {
     private final ExecutorService threadPool;
 
     public UdpDnsServer(int port) {
+        this(port, new RecursiveResolver());
+    }
+
+    public UdpDnsServer(
+            int port,
+            RecursiveResolver resolver
+    ) {
+
+        if (resolver == null) {
+            throw new IllegalArgumentException(
+                    "resolver must not be null"
+            );
+        }
+
         this.port = port;
-        this.resolver = new RecursiveResolver();
+        this.resolver = resolver;
         this.threadPool = Executors.newFixedThreadPool(10);
     }
 

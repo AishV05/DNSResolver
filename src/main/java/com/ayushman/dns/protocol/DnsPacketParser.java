@@ -46,8 +46,25 @@ public class DnsPacketParser {
 
         List<DnsRecord> additionals = new ArrayList<>();
 
+        EdnsInfo edns = null;
+
         for (int i = 0; i < header.arCount(); i++) {
-            additionals.add(readRecord(reader, packet));
+
+            DnsRecord record =
+                    readRecord(reader, packet);
+
+            if (record.type() == EdnsInfo.OPT_RECORD_TYPE) {
+
+                if (edns != null) {
+                    throw new IllegalArgumentException(
+                            "DNS message contains multiple OPT records"
+                    );
+                }
+
+                edns = EdnsInfo.fromOptRecord(record);
+            } else {
+                additionals.add(record);
+            }
         }
 
         return new DnsMessage(
@@ -55,7 +72,8 @@ public class DnsPacketParser {
                 questions,
                 answers,
                 authorities,
-                additionals
+                additionals,
+                edns
         );
     }
 
