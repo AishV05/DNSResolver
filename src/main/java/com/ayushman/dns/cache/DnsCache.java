@@ -7,20 +7,14 @@ import com.ayushman.dns.protocol.DnsQuestion;
 
 public class DnsCache {
 
-    private final ConcurrentHashMap<
-            CacheKey,
-            CacheEntry
-    > entries = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CacheKey, CacheEntry> entries =
+            new ConcurrentHashMap<>();
 
-    public DnsMessage get(
-            DnsQuestion question
-    ) {
+    public CachedDnsData get(DnsQuestion question) {
 
-        CacheKey key =
-                CacheKey.from(question);
+        CacheKey key = CacheKey.from(question);
 
-        CacheEntry entry =
-                entries.get(key);
+        CacheEntry entry = entries.get(key);
 
         if (entry == null) {
             return null;
@@ -33,7 +27,7 @@ public class DnsCache {
             return null;
         }
 
-        return entry.response();
+        return entry.data();
     }
 
     public void put(
@@ -42,23 +36,56 @@ public class DnsCache {
             long ttlSeconds
     ) {
 
-        CacheKey key =
-                CacheKey.from(question);
+        CacheKey key = CacheKey.from(question);
+
+        CachedDnsData data =
+                new CachedDnsData(
+                        response.questions(),
+                        response.answers(),
+                        response.authorities(),
+                        response.additionals()
+                );
+
+        long now = System.currentTimeMillis();
 
         long expiresAt =
-                System.currentTimeMillis()
-                        + ttlSeconds * 1000;
+                now + ttlSeconds * 1000;
 
         entries.put(
                 key,
                 new CacheEntry(
-                        response,
-                        expiresAt
+                        data,
+                        now,
+                        expiresAt,
+                        ttlSeconds
                 )
         );
     }
-
     public int size() {
         return entries.size();
     }
+
+    public void clear() {
+        entries.clear();
+    }
+
+    public long remainingTtl(DnsQuestion question) {
+
+    CacheKey key = CacheKey.from(question);
+
+    CacheEntry entry = entries.get(key);
+
+    if (entry == null) {
+        return 0;
+    }
+
+    if (entry.expired()) {
+
+        entries.remove(key);
+
+        return 0;
+    }
+
+    return entry.remainingTtl();
+}
 }

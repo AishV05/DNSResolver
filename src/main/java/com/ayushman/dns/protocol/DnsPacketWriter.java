@@ -15,16 +15,34 @@ public class DnsPacketWriter {
         return slice(buffer);
     }
 
-    public static byte[] buildResponse(DnsMessage response) {
+        public static byte[] buildResponse(DnsMessage response) {
 
         ByteBuffer buffer = ByteBuffer.allocate(4096);
 
         writeHeader(buffer, response.header());
-        writeQuestions(buffer, response.questions());
-        writeAnswers(buffer, response.answers());
+
+        writeQuestions(
+                buffer,
+                response.questions()
+        );
+
+        writeRecords(
+                buffer,
+                response.answers()
+        );
+
+        writeRecords(
+                buffer,
+                response.authorities()
+        );
+
+        writeRecords(
+                buffer,
+                response.additionals()
+        );
 
         return slice(buffer);
-    }
+        }
 
     private static void writeHeader(
             ByteBuffer buffer,
@@ -60,7 +78,7 @@ public class DnsPacketWriter {
         }
     }
 
-    private static void writeAnswers(
+    private static void writeRecords(
             ByteBuffer buffer,
             List<DnsRecord> answers
     ) {

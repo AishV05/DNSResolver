@@ -1,14 +1,27 @@
 package com.ayushman.dns.cache;
 
-import com.ayushman.dns.protocol.DnsMessage;
-
 public record CacheEntry(
-        DnsMessage response,
-        long expiresAt
+
+        CachedDnsData data,
+
+        long cachedAt,
+
+        long expiresAt,
+
+        long originalTtl
+
 ) {
 
     public boolean expired() {
-        return System.currentTimeMillis()
-                > expiresAt;
+
+        return System.currentTimeMillis() >= expiresAt;
+    }
+
+    public long remainingTtl() {
+
+        long remaining =
+                (expiresAt - System.currentTimeMillis()) / 1000;
+
+        return Math.max(remaining, 0);
     }
 }
