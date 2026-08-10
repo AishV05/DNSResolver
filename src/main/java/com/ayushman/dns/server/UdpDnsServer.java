@@ -21,15 +21,23 @@ public class UdpDnsServer {
 
     public void start() throws Exception {
 
-        DatagramSocket socket = new DatagramSocket(port);
-        System.out.println("DNS Server listening on port " + port);
+        DatagramSocket socket =
+                new DatagramSocket(port);
+
+        System.out.println(
+                "DNS Server listening on port " + port
+        );
 
         while (true) {
 
-            byte[] buffer = new byte[4096];
+            byte[] buffer =
+                    new byte[4096];
 
             DatagramPacket requestPacket =
-                    new DatagramPacket(buffer, buffer.length);
+                    new DatagramPacket(
+                            buffer,
+                            buffer.length
+                    );
 
             socket.receive(requestPacket);
 
@@ -41,5 +49,11 @@ public class UdpDnsServer {
                     )
             );
         }
+    }
+
+    public static void main(String[] args)
+            throws Exception {
+
+        new UdpDnsServer(5354).start();
     }
 }

@@ -1,5 +1,7 @@
 package com.ayushman.dns.resolver;
 
+import java.util.List;
+
 import com.ayushman.dns.cache.CachedDnsData;
 import com.ayushman.dns.cache.DnsCache;
 import com.ayushman.dns.cache.NegativeCache;
@@ -14,6 +16,8 @@ public class RecursiveResolver {
 
     private final UpstreamDnsClient client;
 
+    private final List<String> rootServers;
+
     private final DnsCache cache =
             new DnsCache();
 
@@ -21,13 +25,41 @@ public class RecursiveResolver {
             new NegativeCache();
 
     public RecursiveResolver() {
-        this.client = new UpstreamDnsClient();
+        this(
+                new UpstreamDnsClient(),
+                RootServers.ROOT_SERVERS
+        );
     }
 
     public RecursiveResolver(
             UpstreamDnsClient client
     ) {
+
+        this(
+                client,
+                RootServers.ROOT_SERVERS
+        );
+    }
+
+    public RecursiveResolver(
+            UpstreamDnsClient client,
+            List<String> rootServers
+    ) {
+
+        if (client == null) {
+            throw new IllegalArgumentException(
+                    "client must not be null"
+            );
+        }
+
+        if (rootServers == null || rootServers.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "rootServers must not be empty"
+            );
+        }
+
         this.client = client;
+        this.rootServers = List.copyOf(rootServers);
     }
 
     public DnsMessage resolve(DnsMessage clientQuery)
@@ -119,7 +151,11 @@ public class RecursiveResolver {
         );
 
         String currentServer =
-                RootServers.ROOT_SERVERS.get(0);
+                rootServers.get(0);
+
+        int rootServerIndex = 0;
+
+        boolean queryingRootServer = true;
 
         int maxDepth = 20;
 
@@ -133,11 +169,35 @@ public class RecursiveResolver {
             DnsMessage upstreamQuery =
                     ResolverQueryFactory.create(question);
 
-            DnsMessage upstreamResponse =
-                    client.query(
-                            currentServer,
-                            upstreamQuery
+            DnsMessage upstreamResponse;
+
+            try {
+                upstreamResponse =
+                        client.query(
+                                currentServer,
+                                upstreamQuery
+                        );
+            } catch (UpstreamDnsException e) {
+
+                if (queryingRootServer
+                        && rootServerIndex
+                        < rootServers.size() - 1) {
+
+                    currentServer =
+                            rootServers.get(
+                                    ++rootServerIndex
+                            );
+
+                    System.out.println(
+                            "Root server failed; retrying with "
+                                    + currentServer
                     );
+
+                    continue;
+                }
+
+                throw e;
+            }
 
             System.out.println("--------------------------------");
 
@@ -341,6 +401,8 @@ public class RecursiveResolver {
 
             currentServer =
                     nextServer;
+
+            queryingRootServer = false;
         }
 
         throw new RuntimeException(

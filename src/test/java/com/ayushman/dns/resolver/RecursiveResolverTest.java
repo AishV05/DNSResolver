@@ -395,6 +395,76 @@ public class RecursiveResolverTest {
         );
     }
 
+    @Test
+    void shouldTryNextRootServerAfterUpstreamFailure()
+            throws Exception {
+
+        DnsQuestion question =
+                new DnsQuestion(
+                        "example.com",
+                        1,
+                        1
+                );
+
+        DnsRecord answer =
+                new DnsRecord(
+                        "example.com",
+                        1,
+                        1,
+                        300,
+                        new byte[] {
+                                1, 2, 3, 4
+                        }
+                );
+
+        MockUpstreamDnsClient client =
+                new MockUpstreamDnsClient();
+
+        client.addFailure(
+                new UpstreamDnsException(
+                        "First root server timed out"
+                )
+        );
+
+        client.addResponse(
+                createResponse(
+                        0x8180,
+                        question,
+                        List.of(answer),
+                        List.of(),
+                        List.of()
+                )
+        );
+
+        List<String> rootServers =
+                List.of(
+                        "192.0.2.1",
+                        "192.0.2.2"
+                );
+
+        RecursiveResolver resolver =
+                new RecursiveResolver(
+                        client,
+                        rootServers
+                );
+
+        DnsMessage response =
+                resolver.resolve(
+                        createClientQuery(
+                                7000,
+                                question
+                        )
+                );
+
+        assertEquals(7000, response.header().id());
+        assertEquals(1, response.answers().size());
+        assertEquals(2, client.callCount);
+        assertEquals(
+                rootServers,
+                client.requestedServers
+        );
+    }
+
     private DnsMessage createClientQuery(
             int id,
             DnsQuestion question
@@ -449,7 +519,7 @@ public class RecursiveResolverTest {
     private static class MockUpstreamDnsClient
             extends UpstreamDnsClient {
 
-        private final Queue<DnsMessage> responses =
+        private final Queue<Object> responses =
                 new ArrayDeque<>();
 
         private final List<String> requestedServers =
@@ -464,6 +534,13 @@ public class RecursiveResolverTest {
             responses.add(response);
         }
 
+        void addFailure(
+                Exception failure
+        ) {
+
+            responses.add(failure);
+        }
+
         @Override
         public DnsMessage query(
                 String serverIp,
@@ -476,17 +553,21 @@ public class RecursiveResolverTest {
                     serverIp
             );
 
-            DnsMessage response =
+            Object result =
                     responses.poll();
 
-            if (response == null) {
+            if (result == null) {
 
                 throw new IllegalStateException(
                         "No mock response available"
                 );
             }
 
-            return response;
+            if (result instanceof Exception failure) {
+                throw failure;
+            }
+
+            return (DnsMessage) result;
         }
     }
     @Test
