@@ -1,0 +1,12 @@
+.git
+.idea
+.vscode
+target
+*.iml
+
+# Keep local runtime configuration and credentials out of build contexts.
+.env
+.env.*
+!.env.example
+config/*.env*
+!config/*.env.example

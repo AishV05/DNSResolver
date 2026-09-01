@@ -60,3 +60,13 @@ logs/
 
 *.tmp
 *.swp
+
+#################################
+# Local environment configuration
+#################################
+
+.env
+.env.*
+!.env.example
+config/*.env*
+!config/*.env.example
