@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,7 @@ import com.ayushman.dns.protocol.DnsPacketParser;
 import com.ayushman.dns.protocol.DnsPacketWriter;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
+import com.ayushman.dns.protocol.EdnsInfo;
 
 public class UpstreamDnsClientTest {
 
@@ -78,6 +80,70 @@ public class UpstreamDnsClientTest {
                 assertEquals(1234, response.header().id());
                 assertEquals(1, response.answers().size());
                 assertEquals(1, response.answers().get(0).type());
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void shouldSendEdnsOptInUdpQuery()
+            throws Exception {
+
+        InetAddress loopback =
+                InetAddress.getByName(LOOPBACK_ADDRESS);
+
+        try (DatagramSocket server =
+                new DatagramSocket(0, loopback)) {
+
+            ExecutorService executor =
+                    Executors.newSingleThreadExecutor();
+
+            try {
+                AtomicReference<DnsMessage> receivedQuery =
+                        new AtomicReference<>();
+
+                Future<?> responseTask =
+                        executor.submit(() -> {
+                            DatagramPacket requestPacket =
+                                    receiveUdp(server);
+
+                            DnsMessage request =
+                                    parseUdpPacket(requestPacket);
+
+                            receivedQuery.set(request);
+
+                            sendUdpResponse(
+                                    server,
+                                    requestPacket,
+                                    createAnswerResponse(request)
+                            );
+                        });
+
+                UpstreamDnsClient client =
+                        new UpstreamDnsClient(
+                                500,
+                                1,
+                                server.getLocalPort()
+                        );
+
+                DnsMessage response =
+                        client.query(
+                                LOOPBACK_ADDRESS,
+                                createQueryWithEdns(3456)
+                        );
+
+                responseTask.get(2, TimeUnit.SECONDS);
+
+                EdnsInfo edns =
+                        receivedQuery.get()
+                                .edns()
+                                .orElseThrow();
+
+                assertEquals(3456, response.header().id());
+                assertEquals(1_232, edns.udpPayloadSize());
+                assertEquals(0, edns.version());
+                assertEquals(0, edns.flags());
             } finally {
                 executor.shutdownNow();
             }
@@ -483,6 +549,28 @@ public class UpstreamDnsClientTest {
                 List.of(),
                 List.of(),
                 List.of()
+        );
+    }
+
+    private static DnsMessage createQueryWithEdns(
+            int transactionId
+    ) {
+
+        DnsMessage query = createQuery(transactionId);
+
+        return new DnsMessage(
+                query.header(),
+                query.questions(),
+                query.answers(),
+                query.authorities(),
+                query.additionals(),
+                new EdnsInfo(
+                        1_232,
+                        0,
+                        0,
+                        0,
+                        new byte[0]
+                )
         );
     }
 

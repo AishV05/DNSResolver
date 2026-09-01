@@ -5,44 +5,72 @@ import java.util.List;
 
 public class DnsPacketWriter {
 
+    private static final int MAX_DNS_MESSAGE_SIZE = 65_535;
+
     public static byte[] buildQuery(DnsMessage query) {
+        return buildMessage(query);
+    }
 
-        ByteBuffer buffer = ByteBuffer.allocate(4096);
+    public static byte[] buildResponse(DnsMessage response) {
+        return buildMessage(response);
+    }
 
-        writeHeader(buffer, query.header());
-        writeQuestions(buffer, query.questions());
+    private static byte[] buildMessage(
+            DnsMessage message
+    ) {
+
+        ByteBuffer buffer =
+                ByteBuffer.allocate(MAX_DNS_MESSAGE_SIZE);
+
+        writeHeader(
+                buffer,
+                headerForWriting(message)
+        );
+
+        writeQuestions(
+                buffer,
+                message.questions()
+        );
+
+        writeRecords(
+                buffer,
+                message.answers()
+        );
+
+        writeRecords(
+                buffer,
+                message.authorities()
+        );
+
+        writeRecords(
+                buffer,
+                message.additionals()
+        );
+
+        message.edns().ifPresent(
+                edns -> writeEdns(buffer, edns)
+        );
 
         return slice(buffer);
     }
 
-        public static byte[] buildResponse(DnsMessage response) {
+    private static DnsHeader headerForWriting(
+            DnsMessage message
+    ) {
 
-        ByteBuffer buffer = ByteBuffer.allocate(4096);
+        int additionalCount =
+                message.additionals().size()
+                        + (message.edns().isPresent() ? 1 : 0);
 
-        writeHeader(buffer, response.header());
-
-        writeQuestions(
-                buffer,
-                response.questions()
+        return new DnsHeader(
+                message.header().id(),
+                message.header().flags(),
+                message.questions().size(),
+                message.answers().size(),
+                message.authorities().size(),
+                additionalCount
         );
-
-        writeRecords(
-                buffer,
-                response.answers()
-        );
-
-        writeRecords(
-                buffer,
-                response.authorities()
-        );
-
-        writeRecords(
-                buffer,
-                response.additionals()
-        );
-
-        return slice(buffer);
-        }
+    }
 
     private static void writeHeader(
             ByteBuffer buffer,
@@ -80,10 +108,10 @@ public class DnsPacketWriter {
 
     private static void writeRecords(
             ByteBuffer buffer,
-            List<DnsRecord> answers
+            List<DnsRecord> records
     ) {
 
-        for (DnsRecord record : answers) {
+        for (DnsRecord record : records) {
 
             DnsNameCodec.encode(
                     record.name(),
@@ -111,6 +139,22 @@ public class DnsPacketWriter {
                     record.rdata()
             );
         }
+    }
+
+    private static void writeEdns(
+            ByteBuffer buffer,
+            EdnsInfo edns
+    ) {
+
+        buffer.put((byte) 0);
+        buffer.putShort((short) EdnsInfo.OPT_RECORD_TYPE);
+        buffer.putShort((short) edns.udpPayloadSize());
+        buffer.putInt((int) edns.ttl());
+
+        byte[] options = edns.options();
+
+        buffer.putShort((short) options.length);
+        buffer.put(options);
     }
 
     private static byte[] slice(

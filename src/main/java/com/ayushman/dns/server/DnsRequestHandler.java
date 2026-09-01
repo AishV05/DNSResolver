@@ -2,27 +2,49 @@ package com.ayushman.dns.server;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.util.List;
 
 import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsPacketParser;
 import com.ayushman.dns.protocol.DnsPacketWriter;
+import com.ayushman.dns.protocol.EdnsInfo;
 import com.ayushman.dns.resolver.RecursiveResolver;
 
-public class DnsRequestHandler implements Runnable{
+public class DnsRequestHandler implements Runnable {
+
+    private static final int DEFAULT_UDP_PAYLOAD_SIZE = 512;
+
+    private static final int SERVER_UDP_PAYLOAD_SIZE = 1_232;
+
+    private static final int BADVERS_EXTENDED_RCODE = 1;
+
+    private static final int TRUNCATED_FLAG = 0x0200;
+
     private final DatagramPacket requestPacket;
     private final DatagramSocket socket;
     private final RecursiveResolver resolver;
+    private final ServerMetrics metrics;
 
     public DnsRequestHandler(DatagramSocket socket, DatagramPacket requestPacket, RecursiveResolver resolver){
+        this(socket, requestPacket, resolver, new ServerMetrics());
+    }
+
+    DnsRequestHandler(
+            DatagramSocket socket,
+            DatagramPacket requestPacket,
+            RecursiveResolver resolver,
+            ServerMetrics metrics
+    ) {
         this.socket = socket;
         this.requestPacket = requestPacket;
         this.resolver = resolver;
+        this.metrics = metrics;
     }
 
     @Override
     public void run() {
-        long startTime = System.currentTimeMillis();
+        long startTime = System.nanoTime();
 
         byte[] requestData = new byte[requestPacket.getLength()];
         System.arraycopy(
@@ -38,8 +60,22 @@ public class DnsRequestHandler implements Runnable{
         try {
             query = DnsPacketParser.parse(requestData);
         } catch (Exception e) {
+            metrics.recordMalformedRequest();
+
             try {
                 sendFormatError(requestData);
+            } catch (Exception ignored) {
+                // The client cannot be notified if sending the error fails.
+            }
+
+            return;
+        }
+
+        if (hasUnsupportedEdnsVersion(query)) {
+            metrics.recordUnsupportedEdnsVersion();
+
+            try {
+                sendBadVersion(query);
             } catch (Exception ignored) {
                 // The client cannot be notified if sending the error fails.
             }
@@ -50,17 +86,21 @@ public class DnsRequestHandler implements Runnable{
         try {
             DnsMessage responseMessage = resolver.resolve(query);
 
-            sendResponse(responseMessage);
+            sendResponseForQuery(responseMessage, query);
 
-            long duration = System.currentTimeMillis() - startTime;
+            long duration = System.nanoTime() - startTime;
+
+            metrics.recordResolvedRequest(duration);
 
             System.out.println(
                     "Handled query from "
                             + requestPacket.getAddress()
                             + " in "
-                            + duration + " ms"
+                            + duration / 1_000_000 + " ms"
             );
         } catch (Exception e) {
+            metrics.recordResolverFailure();
+
             try {
                 sendServFail(query);
             } catch (Exception ignored) {
@@ -92,12 +132,50 @@ public class DnsRequestHandler implements Runnable{
         new DnsMessage(
                 header,
                 query.questions(),
-                java.util.List.of(),
-                java.util.List.of(),
-                java.util.List.of()
+                List.of(),
+                List.of(),
+                List.of()
         );
 
-        sendResponse(errorResponse);
+        sendResponseForQuery(errorResponse, query);
+    }
+
+    private void sendBadVersion(
+            DnsMessage query
+    ) throws Exception {
+
+        int flags =
+                0x8000
+                        | (query.header().flags() & 0x0100)
+                        | 0x0080;
+
+        DnsMessage errorResponse =
+                new DnsMessage(
+                        new DnsHeader(
+                                query.header().id(),
+                                flags,
+                                query.questions().size(),
+                                0,
+                                0,
+                                0
+                        ),
+                        query.questions(),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        new EdnsInfo(
+                                responsePayloadSize(query),
+                                BADVERS_EXTENDED_RCODE,
+                                EdnsInfo.VERSION_ZERO,
+                                0,
+                                new byte[0]
+                        )
+                );
+
+        sendPreparedResponse(
+                errorResponse,
+                responsePayloadSize(query)
+        );
     }
 
     private void sendFormatError(
@@ -134,21 +212,99 @@ public class DnsRequestHandler implements Runnable{
                                 0,
                                 0
                         ),
-                        java.util.List.of(),
-                        java.util.List.of(),
-                        java.util.List.of(),
-                        java.util.List.of()
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of()
                 );
 
-        sendResponse(errorResponse);
+        sendPreparedResponse(
+                errorResponse,
+                DEFAULT_UDP_PAYLOAD_SIZE
+        );
     }
 
-    private void sendResponse(
-            DnsMessage responseMessage
+    private boolean hasUnsupportedEdnsVersion(
+            DnsMessage query
+    ) {
+
+        return query.edns()
+                .map(
+                        edns -> edns.version()
+                                != EdnsInfo.VERSION_ZERO
+                )
+                .orElse(false);
+    }
+
+    private void sendResponseForQuery(
+            DnsMessage resolverResponse,
+            DnsMessage clientQuery
+    ) throws Exception {
+
+        DnsMessage response =
+                withEdnsForClient(
+                        resolverResponse,
+                        clientQuery
+                );
+
+        sendPreparedResponse(
+                response,
+                responsePayloadSize(clientQuery)
+        );
+    }
+
+    private DnsMessage withEdnsForClient(
+            DnsMessage resolverResponse,
+            DnsMessage clientQuery
+    ) {
+
+        EdnsInfo responseEdns =
+                clientQuery.edns()
+                        .map(ignored -> new EdnsInfo(
+                                responsePayloadSize(clientQuery),
+                                0,
+                                EdnsInfo.VERSION_ZERO,
+                                0,
+                                new byte[0]
+                        ))
+                        .orElse(null);
+
+        return new DnsMessage(
+                resolverResponse.header(),
+                resolverResponse.questions(),
+                resolverResponse.answers(),
+                resolverResponse.authorities(),
+                resolverResponse.additionals(),
+                responseEdns
+        );
+    }
+
+    private int responsePayloadSize(
+            DnsMessage query
+    ) {
+
+        return query.edns()
+                .map(EdnsInfo::effectiveUdpPayloadSize)
+                .map(size -> Math.min(
+                        size,
+                        SERVER_UDP_PAYLOAD_SIZE
+                ))
+                .orElse(DEFAULT_UDP_PAYLOAD_SIZE);
+    }
+
+    private void sendPreparedResponse(
+            DnsMessage responseMessage,
+            int payloadSize
     ) throws Exception {
 
         byte[] response =
                 DnsPacketWriter.buildResponse(responseMessage);
+
+        if (response.length > payloadSize) {
+            response = DnsPacketWriter.buildResponse(
+                    truncatedResponse(responseMessage)
+            );
+        }
 
         DatagramPacket responsePacket =
                 new DatagramPacket(
@@ -159,5 +315,31 @@ public class DnsRequestHandler implements Runnable{
                 );
 
         socket.send(responsePacket);
+    }
+
+    private DnsMessage truncatedResponse(
+            DnsMessage response
+    ) {
+
+        DnsHeader header = response.header();
+
+        DnsHeader truncatedHeader =
+                new DnsHeader(
+                        header.id(),
+                        header.flags() | TRUNCATED_FLAG,
+                        response.questions().size(),
+                        0,
+                        0,
+                        0
+                );
+
+        return new DnsMessage(
+                truncatedHeader,
+                response.questions(),
+                List.of(),
+                List.of(),
+                List.of(),
+                response.edns().orElse(null)
+        );
     }
 }

@@ -5,8 +5,11 @@ import java.util.List;
 import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsQuestion;
+import com.ayushman.dns.protocol.EdnsInfo;
 
 public final class ResolverQueryFactory {
+
+    public static final int UPSTREAM_UDP_PAYLOAD_SIZE = 1_232;
 
     private ResolverQueryFactory() {}
 
@@ -29,7 +32,14 @@ public final class ResolverQueryFactory {
                 List.of(question),
                 List.of(),
                 List.of(),
-                List.of()
+                List.of(),
+                new EdnsInfo(
+                        UPSTREAM_UDP_PAYLOAD_SIZE,
+                        0,
+                        0,
+                        0,
+                        new byte[0]
+                )
         );
     }
 }

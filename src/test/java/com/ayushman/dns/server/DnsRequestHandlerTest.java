@@ -15,6 +15,7 @@ import com.ayushman.dns.protocol.DnsPacketParser;
 import com.ayushman.dns.protocol.DnsPacketWriter;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
+import com.ayushman.dns.protocol.EdnsInfo;
 import com.ayushman.dns.resolver.RecursiveResolver;
 
 public class DnsRequestHandlerTest {
@@ -40,7 +41,98 @@ public class DnsRequestHandlerTest {
         assertEquals(1234, response.header().id());
         assertEquals(1, response.answers().size());
         assertEquals("example.com", response.answers().get(0).name());
+        assertEquals(false, response.edns().isPresent());
         assertEquals(1, resolver.callCount);
+    }
+
+    @Test
+    void shouldReturnOptForEdnsZeroQuery()
+            throws Exception {
+
+        DnsMessage query =
+                createEdnsQuery(
+                        1234,
+                        4_096,
+                        EdnsInfo.VERSION_ZERO,
+                        EdnsInfo.DNSSEC_OK_FLAG
+                );
+
+        DnsMessage response =
+                handleRequest(
+                        query,
+                        StubResolver.returning(
+                                createAnswerResponse(query)
+                        )
+                );
+
+        EdnsInfo edns = response.edns().orElseThrow();
+
+        assertEquals(1_232, edns.udpPayloadSize());
+        assertEquals(0, edns.extendedRcode());
+        assertEquals(EdnsInfo.VERSION_ZERO, edns.version());
+        assertEquals(0, edns.flags());
+        assertEquals(false, edns.dnssecOk());
+    }
+
+    @Test
+    void shouldReturnBadVersForUnsupportedEdnsVersion()
+            throws Exception {
+
+        DnsMessage query =
+                createEdnsQuery(
+                        2345,
+                        1_232,
+                        1,
+                        0
+                );
+
+        StubResolver resolver =
+                StubResolver.failing(
+                        new RuntimeException(
+                                "Resolver must not be called"
+                        )
+                );
+
+        DnsMessage response =
+                handleRequest(query, resolver);
+
+        EdnsInfo edns = response.edns().orElseThrow();
+
+        assertEquals(2345, response.header().id());
+        assertEquals(0, response.header().flags() & 0x000F);
+        assertEquals(1, edns.extendedRcode());
+        assertEquals(EdnsInfo.VERSION_ZERO, edns.version());
+        assertEquals(0, response.answers().size());
+        assertEquals(0, resolver.callCount);
+    }
+
+    @Test
+    void shouldTruncateOversizedEdnsResponseToClientPayload()
+            throws Exception {
+
+        DnsMessage query =
+                createEdnsQuery(
+                        3456,
+                        512,
+                        EdnsInfo.VERSION_ZERO,
+                        0
+                );
+
+        byte[] responseData =
+                handleRawRequestData(
+                        DnsPacketWriter.buildQuery(query),
+                        StubResolver.returning(
+                                createLargeAnswerResponse(query)
+                        )
+                );
+
+        DnsMessage response =
+                DnsPacketParser.parse(responseData);
+
+        assertEquals(true, responseData.length <= 512);
+        assertEquals(true, (response.header().flags() & 0x0200) != 0);
+        assertEquals(0, response.answers().size());
+        assertEquals(512, response.edns().orElseThrow().udpPayloadSize());
     }
 
     @Test
@@ -105,6 +197,16 @@ public class DnsRequestHandlerTest {
             StubResolver resolver
     ) throws Exception {
 
+        return DnsPacketParser.parse(
+                handleRawRequestData(requestData, resolver)
+        );
+    }
+
+    private byte[] handleRawRequestData(
+            byte[] requestData,
+            StubResolver resolver
+    ) throws Exception {
+
         try (DatagramSocket serverSocket =
                 new DatagramSocket(0, LOOPBACK);
                 DatagramSocket clientSocket =
@@ -147,7 +249,7 @@ public class DnsRequestHandlerTest {
                     responsePacket.getLength()
             );
 
-            return DnsPacketParser.parse(responseData);
+            return responseData;
         }
     }
 
@@ -204,6 +306,62 @@ public class DnsRequestHandlerTest {
                 ),
                 query.questions(),
                 List.of(answer),
+                List.of(),
+                List.of()
+        );
+    }
+
+    private DnsMessage createEdnsQuery(
+            int transactionId,
+            int udpPayloadSize,
+            int version,
+            int flags
+    ) {
+
+        DnsMessage query = createQuery(transactionId);
+
+        return new DnsMessage(
+                query.header(),
+                query.questions(),
+                query.answers(),
+                query.authorities(),
+                query.additionals(),
+                new EdnsInfo(
+                        udpPayloadSize,
+                        0,
+                        version,
+                        flags,
+                        new byte[0]
+                )
+        );
+    }
+
+    private DnsMessage createLargeAnswerResponse(
+            DnsMessage query
+    ) {
+
+        List<DnsRecord> answers =
+                java.util.stream.IntStream.range(0, 10)
+                        .mapToObj(index -> new DnsRecord(
+                                "record" + index + ".example.com",
+                                16,
+                                1,
+                                300,
+                                new byte[80]
+                        ))
+                        .toList();
+
+        return new DnsMessage(
+                new DnsHeader(
+                        query.header().id(),
+                        0x8180,
+                        1,
+                        answers.size(),
+                        0,
+                        0
+                ),
+                query.questions(),
+                answers,
                 List.of(),
                 List.of()
         );

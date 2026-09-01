@@ -4,6 +4,8 @@ public final class EdnsInfo {
 
     public static final int OPT_RECORD_TYPE = 41;
 
+    public static final int VERSION_ZERO = 0;
+
     public static final int DNSSEC_OK_FLAG = 0x8000;
 
     private final int udpPayloadSize;
@@ -44,6 +46,12 @@ public final class EdnsInfo {
         if (options == null) {
             throw new IllegalArgumentException(
                     "options must not be null"
+            );
+        }
+
+        if (options.length > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "options must not exceed 65535 bytes"
             );
         }
 
@@ -116,6 +124,12 @@ public final class EdnsInfo {
 
     public byte[] options() {
         return options.clone();
+    }
+
+    public long ttl() {
+        return ((long) extendedRcode << 24)
+                | ((long) version << 16)
+                | flags;
     }
 
     private static void validateUnsigned8(
