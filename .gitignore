@@ -70,3 +70,7 @@ logs/
 !.env.example
 config/*.env*
 !config/*.env.example
+
+# Local embedded database files
+data/
+*.mv.db

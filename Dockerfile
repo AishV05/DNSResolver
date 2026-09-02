@@ -4,6 +4,7 @@ WORKDIR /build
 COPY pom.xml ./
 COPY dns-core/pom.xml ./dns-core/pom.xml
 COPY dns-server/pom.xml ./dns-server/pom.xml
+COPY admin-api/pom.xml ./admin-api/pom.xml
 COPY integration-tests/pom.xml ./integration-tests/pom.xml
 RUN mvn -q -pl dns-server -am -DskipTests dependency:go-offline
 COPY dns-core/src ./dns-core/src

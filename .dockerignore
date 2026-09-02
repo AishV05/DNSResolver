@@ -10,3 +10,5 @@ target
 !.env.example
 config/*.env*
 !config/*.env.example
+data/
+*.mv.db
