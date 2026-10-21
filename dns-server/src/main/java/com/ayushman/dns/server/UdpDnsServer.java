@@ -12,6 +12,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import com.ayushman.dns.resolver.DnsResolver;
 import com.ayushman.dns.resolver.RecursiveResolver;
 import com.ayushman.dns.resolver.UpstreamDnsClient;
 
@@ -20,7 +21,7 @@ public class UdpDnsServer implements AutoCloseable {
     private static final int RECEIVE_TIMEOUT_MILLIS = 1_000;
 
     private final int port;
-    private final RecursiveResolver resolver;
+    private final DnsRequestProcessor processor;
     private final ExecutorService threadPool;
     private final RequestAdmissionController admissionController;
     private final ServerMetrics metrics;
@@ -38,7 +39,7 @@ public class UdpDnsServer implements AutoCloseable {
 
     public UdpDnsServer(
             int port,
-            RecursiveResolver resolver
+            DnsResolver resolver
     ) {
 
         this(
@@ -83,7 +84,21 @@ public class UdpDnsServer implements AutoCloseable {
 
     UdpDnsServer(
             ServerConfig config,
-            RecursiveResolver resolver,
+            DnsResolver resolver,
+            RequestAdmissionController admissionController,
+            ServerMetrics metrics
+    ) {
+        this(
+                config,
+                new DnsRequestProcessor(resolver, metrics),
+                admissionController,
+                metrics
+        );
+    }
+
+    UdpDnsServer(
+            ServerConfig config,
+            DnsRequestProcessor processor,
             RequestAdmissionController admissionController,
             ServerMetrics metrics
     ) {
@@ -94,9 +109,9 @@ public class UdpDnsServer implements AutoCloseable {
             );
         }
 
-        if (resolver == null) {
+        if (processor == null) {
             throw new IllegalArgumentException(
-                    "resolver must not be null"
+                    "processor must not be null"
             );
         }
 
@@ -113,7 +128,7 @@ public class UdpDnsServer implements AutoCloseable {
         }
 
         this.port = config.port();
-        this.resolver = resolver;
+        this.processor = processor;
         this.admissionController = admissionController;
         this.metrics = metrics;
         this.metricsIntervalSeconds = config.metricsIntervalSeconds();
@@ -235,8 +250,7 @@ public class UdpDnsServer implements AutoCloseable {
                         new DnsRequestHandler(
                                 serverSocket,
                                 requestPacket,
-                                resolver,
-                                metrics
+                                processor
                         )
                 );
             } catch (RejectedExecutionException ignored) {

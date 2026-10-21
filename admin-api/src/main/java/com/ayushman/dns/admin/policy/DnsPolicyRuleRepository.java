@@ -11,6 +11,9 @@ interface DnsPolicyRuleRepository
 
     List<DnsPolicyRuleEntity> findAllByOrderByDomainNameAscMatchTypeAsc();
 
+    List<DnsPolicyRuleEntity>
+            findAllByEnabledTrueOrderByDomainNameAscMatchTypeAsc();
+
     Optional<DnsPolicyRuleEntity> findByDomainNameAndMatchType(
             String domainName,
             DnsPolicyMatchType matchType

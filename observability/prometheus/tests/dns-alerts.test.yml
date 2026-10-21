@@ -1,0 +1,64 @@
+rule_files:
+  - ../rules/dns-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: required policy without a snapshot becomes critical
+    interval: 1m
+    input_series:
+      - series: dns_policy_ready
+        values: 0x10
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DnsPolicyNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Required DNS policy has no active snapshot
+              description: >-
+                Policy mode is REQUIRED but no valid initial snapshot has been
+                loaded for at least two minutes. DNS queries fail closed until
+                authentication, control-plane reachability, and snapshot
+                validation succeed.
+
+  - name: last-known-good policy becomes stale without losing readiness
+    interval: 1m
+    input_series:
+      - series: dns_policy_ready
+        values: 1x12
+      - series: dns_policy_sync_stale
+        values: 1x12
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DnsPolicySyncStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: DNS policy synchronization is stale
+              description: >-
+                The resolver is serving its last-known-good policy, but no
+                valid snapshot response has arrived within the runtime-derived
+                stale threshold. Check the policy endpoint, reader token, and
+                DNS logs.
+
+  - name: repeated policy synchronization failures become warning
+    interval: 1m
+    input_series:
+      - series: 'dns_policy_sync_results_total{result="failure"}'
+        values: 0 1 2 3 4 5 6 7 8 9 10 11
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DnsPolicySyncFailures
+        exp_alerts:
+          - exp_labels:
+              result: failure
+              severity: warning
+            exp_annotations:
+              summary: DNS policy synchronization is repeatedly failing
+              description: >-
+                At least three policy synchronization attempts failed in the
+                trailing five-minute window for five minutes. The active
+                last-known-good snapshot, if present, remains in use.

@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform permanent release assets manifest",
+  "description": "Structural contract for the exact immutable GitHub Release asset set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "version",
+    "tag",
+    "source",
+    "manifests",
+    "binaries",
+    "imageSboms",
+    "checksumFile"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "manifests": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/releaseManifestAsset"
+        },
+        {
+          "$ref": "#/$defs/publicationManifestAsset"
+        },
+        {
+          "$ref": "#/$defs/imageSbomManifestAsset"
+        }
+      ],
+      "items": false
+    },
+    "binaries": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/adminBinary"
+        },
+        {
+          "$ref": "#/$defs/dnsBinary"
+        }
+      ],
+      "items": false
+    },
+    "imageSboms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/adminImageSbom"
+        },
+        {
+          "$ref": "#/$defs/dnsImageSbom"
+        }
+      ],
+      "items": false
+    },
+    "checksumFile": {
+      "$ref": "#/$defs/checksumFile"
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "commitTimestamp"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "commitTimestamp": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "manifestAssetBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "filename",
+        "mediaType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "const": "application/json"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "releaseManifestAsset": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/manifestAssetBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "release-bundle"
+            },
+            "filename": {
+              "const": "release-manifest.json"
+            }
+          }
+        }
+      ]
+    },
+    "publicationManifestAsset": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/manifestAssetBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "container-publication"
+            },
+            "filename": {
+              "const": "container-publication-manifest.json"
+            }
+          }
+        }
+      ]
+    },
+    "imageSbomManifestAsset": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/manifestAssetBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "image-sbom"
+            },
+            "filename": {
+              "const": "image-sbom-manifest.json"
+            }
+          }
+        }
+      ]
+    },
+    "binaryBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "filename",
+        "mediaType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "const": "application/java-archive"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "adminBinary": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/binaryBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "admin-api"
+            },
+            "filename": {
+              "type": "string",
+              "pattern": "^admin-api-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            }
+          }
+        }
+      ]
+    },
+    "dnsBinary": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/binaryBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "dns-server"
+            },
+            "filename": {
+              "type": "string",
+              "pattern": "^dns-server-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            }
+          }
+        }
+      ]
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "digest"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "imageSbomBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "filename",
+        "mediaType",
+        "sizeBytes",
+        "sha256",
+        "subject"
+      ],
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "const": "application/spdx+json"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "subject": {
+          "$ref": "#/$defs/subject"
+        }
+      }
+    },
+    "adminImageSbom": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageSbomBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "admin-api"
+            },
+            "filename": {
+              "const": "admin-api.spdx.json"
+            },
+            "subject": {
+              "properties": {
+                "repository": {
+                  "const": "ghcr.io/aishv05/dns-admin-api"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "dnsImageSbom": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageSbomBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "dns-server"
+            },
+            "filename": {
+              "const": "dns-server.spdx.json"
+            },
+            "subject": {
+              "properties": {
+                "repository": {
+                  "const": "ghcr.io/aishv05/dns-resolver"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "checksumFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "algorithm",
+        "coveredFiles"
+      ],
+      "properties": {
+        "filename": {
+          "const": "SHA256SUMS"
+        },
+        "algorithm": {
+          "const": "sha256"
+        },
+        "coveredFiles": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "prefixItems": [
+            {
+              "type": "string",
+              "pattern": "^admin-api-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            },
+            {
+              "const": "admin-api.spdx.json"
+            },
+            {
+              "const": "container-publication-manifest.json"
+            },
+            {
+              "type": "string",
+              "pattern": "^dns-server-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            },
+            {
+              "const": "dns-server.spdx.json"
+            },
+            {
+              "const": "image-sbom-manifest.json"
+            },
+            {
+              "const": "release-assets-manifest.json"
+            },
+            {
+              "const": "release-manifest.json"
+            }
+          ],
+          "items": false
+        }
+      }
+    }
+  }
+}

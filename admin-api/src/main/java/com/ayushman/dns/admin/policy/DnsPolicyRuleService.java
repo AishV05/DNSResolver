@@ -10,9 +10,14 @@ import org.springframework.transaction.annotation.Transactional;
 public class DnsPolicyRuleService {
 
     private final DnsPolicyRuleRepository repository;
+    private final DnsPolicySnapshotService snapshotService;
 
-    DnsPolicyRuleService(DnsPolicyRuleRepository repository) {
+    DnsPolicyRuleService(
+            DnsPolicyRuleRepository repository,
+            DnsPolicySnapshotService snapshotService
+    ) {
         this.repository = repository;
+        this.snapshotService = snapshotService;
     }
 
     @Transactional(readOnly = true)
@@ -29,6 +34,7 @@ public class DnsPolicyRuleService {
 
     @Transactional
     DnsPolicyRuleResponse create(CreateDnsPolicyRuleRequest request) {
+        DnsPolicySnapshotStateEntity state = snapshotService.lockedState();
         DnsPolicyRule rule = new DnsPolicyRule(
                 request.domainName(),
                 request.matchType(),
@@ -50,7 +56,11 @@ public class DnsPolicyRuleService {
                 true
         );
 
-        return toResponse(repository.saveAndFlush(entity));
+        DnsPolicyRuleResponse response = toResponse(
+                repository.saveAndFlush(entity)
+        );
+        snapshotService.publish(state);
+        return response;
     }
 
     @Transactional
@@ -58,6 +68,7 @@ public class DnsPolicyRuleService {
             long id,
             UpdateDnsPolicyRuleRequest request
     ) {
+        DnsPolicySnapshotStateEntity state = snapshotService.lockedState();
         DnsPolicyRuleEntity entity = findById(id);
         DnsPolicyRule rule = new DnsPolicyRule(
                 request.domainName(),
@@ -81,12 +92,19 @@ public class DnsPolicyRuleService {
                 request.enabled()
         );
 
-        return toResponse(repository.saveAndFlush(entity));
+        DnsPolicyRuleResponse response = toResponse(
+                repository.saveAndFlush(entity)
+        );
+        snapshotService.publish(state);
+        return response;
     }
 
     @Transactional
     void delete(long id) {
+        DnsPolicySnapshotStateEntity state = snapshotService.lockedState();
         repository.delete(findById(id));
+        repository.flush();
+        snapshotService.publish(state);
     }
 
     @Transactional(readOnly = true)

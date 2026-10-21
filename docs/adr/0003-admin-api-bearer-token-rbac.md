@@ -27,10 +27,14 @@ The roles are deliberately small and explicit:
 | --- | --- |
 | `VIEWER` | Read admin status, resolver configuration, and policy records |
 | `POLICY_EDITOR` | `VIEWER` permissions plus policy creation, update, and deletion |
+| `POLICY_SNAPSHOT_READER` | Read only the internal versioned policy snapshot |
 | `ADMIN` | All management-plane permissions, including identity and token lifecycle |
 
 The API applies those roles to explicit routes. `GET /api/v1/admin/auth/me`
-requires any authenticated role. `GET`/`POST /api/v1/admin/users`,
+requires a management role (`VIEWER`, `POLICY_EDITOR`, or `ADMIN`), while
+`POLICY_SNAPSHOT_READER` is restricted to
+`GET /api/v1/internal/policy-snapshot`. `ADMIN` may inspect that snapshot too.
+`GET`/`POST /api/v1/admin/users`,
 `GET`/`POST /api/v1/admin/users/{id}/tokens`, and
 `DELETE /api/v1/admin/tokens/{id}` require `ADMIN`. The policy and operational
 route matrix follows the role permissions above.
@@ -69,7 +73,6 @@ this low-volume control plane in exchange for persistent state and immediate
 revocation.
 
 The authentication boundary applies only to `admin-api`. `dns-server` and
-`dns-core` remain free of identity, web, and database dependencies. Policy
-records are still `PERSISTED_NOT_APPLIED`; Week 12 secures their management but
-does not cause a running DNS server to enforce them. Future policy-snapshot
-distribution and data-plane enforcement remain separate work.
+`dns-core` remain free of identity, web, and database dependencies. This ADR
+secures policy management; snapshot distribution and data-plane enforcement are
+defined separately in ADRs 0015-0019.

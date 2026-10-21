@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - dns-staging
+
+config-variables:
+  - STAGING_CONFIG_FILE
+

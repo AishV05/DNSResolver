@@ -9,10 +9,11 @@ import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
 
-public class SimpleResolver {
+public class SimpleResolver implements DnsResolver {
 
     private final DnsCache cache = new DnsCache();
 
+    @Override
     public DnsMessage resolve(DnsMessage query) {
 
         DnsQuestion question = query.questions().get(0);

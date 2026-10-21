@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform deterministic release manifest",
+  "description": "Structural contract for a local, checksummed DNS Platform release bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "version",
+    "tag",
+    "source",
+    "build",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "commitTimestamp"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "commitTimestamp": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "builderImage",
+        "platform",
+        "javaRelease",
+        "mavenVersion"
+      ],
+      "properties": {
+        "builderImage": {
+          "const": "maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82"
+        },
+        "platform": {
+          "const": "linux/amd64"
+        },
+        "javaRelease": {
+          "const": 17
+        },
+        "mavenVersion": {
+          "const": "3.9.11"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/adminApiArtifact"
+        },
+        {
+          "$ref": "#/$defs/dnsServerArtifact"
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "artifactBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "file",
+        "mediaType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "mediaType": {
+          "const": "application/java-archive"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "adminApiArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactBase"
+        },
+        {
+          "properties": {
+            "name": {
+              "const": "admin-api"
+            },
+            "file": {
+              "type": "string",
+              "pattern": "^admin-api-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            }
+          }
+        }
+      ]
+    },
+    "dnsServerArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactBase"
+        },
+        {
+          "properties": {
+            "name": {
+              "const": "dns-server"
+            },
+            "file": {
+              "type": "string",
+              "pattern": "^dns-server-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.jar$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

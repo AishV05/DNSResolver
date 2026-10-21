@@ -1,0 +1,12 @@
+services:
+  admin-api:
+    environment:
+      DNS_ADMIN_BOOTSTRAP_USERNAME: "${STAGING_BOOTSTRAP_USERNAME:?Set STAGING_BOOTSTRAP_USERNAME for first initialization}"
+    secrets:
+      - source: admin-bootstrap-token
+        target: dns.admin.bootstrap.token
+        mode: 0444
+
+secrets:
+  admin-bootstrap-token:
+    file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the root-owned secret directory}/admin-bootstrap-token"

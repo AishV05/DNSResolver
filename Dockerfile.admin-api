@@ -1,0 +1,64 @@
+ARG APP_VERSION=0.1.0-SNAPSHOT
+ARG VCS_REF=unknown
+ARG BUILD_DATE=1970-01-01T00:00:00Z
+ARG SOURCE_URL=https://github.com/AishV05/DNSResolver
+
+FROM maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82 AS build
+
+ARG APP_VERSION
+
+WORKDIR /build
+COPY pom.xml ./
+COPY dns-core/pom.xml ./dns-core/pom.xml
+COPY dns-server/pom.xml ./dns-server/pom.xml
+COPY admin-api/pom.xml ./admin-api/pom.xml
+COPY integration-tests/pom.xml ./integration-tests/pom.xml
+RUN --mount=type=cache,id=dns-platform-maven,target=/root/.m2,sharing=locked \
+    mvn -B -ntp -pl admin-api -am -Drevision="${APP_VERSION}" \
+        -DskipTests dependency:go-offline
+
+COPY dns-core/src ./dns-core/src
+COPY admin-api/src ./admin-api/src
+RUN --mount=type=cache,id=dns-platform-maven,target=/root/.m2,sharing=locked \
+    mvn -B -ntp -pl admin-api -am -Drevision="${APP_VERSION}" \
+        -DskipTests package
+
+FROM eclipse-temurin:17-jre-jammy@sha256:ec72ba5962b45ae4e7f96bfb5ebf6eeb34a488b967f937c8e14f0aaec688954f
+
+ARG APP_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+ARG SOURCE_URL
+
+LABEL org.opencontainers.image.title="DNS Resolver Admin API" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+RUN groupadd --system dnsadmin \
+    && useradd --system --gid dnsadmin --home /app dnsadmin
+
+WORKDIR /app
+COPY --from=build --chown=dnsadmin:dnsadmin \
+    /build/admin-api/target/admin-api-*.jar \
+    /tmp/admin-artifacts/
+RUN set -eux; \
+    set -- /tmp/admin-artifacts/admin-api-*.jar; \
+    test "$#" -eq 1; \
+    mv "$1" /app/dns-admin-api.jar; \
+    rmdir /tmp/admin-artifacts
+RUN mkdir -p /app/data \
+    && chown -R dnsadmin:dnsadmin /app
+
+USER dnsadmin
+EXPOSE 8081
+ENV DNS_ADMIN_BIND_ADDRESS=0.0.0.0
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD java -Dloader.main=com.ayushman.dns.admin.AdminApiHealthCheck \
+        -cp /app/dns-admin-api.jar \
+        org.springframework.boot.loader.launch.PropertiesLauncher \
+        "${DNS_ADMIN_PORT:-8081}"
+
+ENTRYPOINT ["java", "-jar", "/app/dns-admin-api.jar"]

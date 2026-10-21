@@ -1,0 +1,243 @@
+name: dns-platform-staging
+
+services:
+  dns-server:
+    platform: linux/amd64
+    pull_policy: always
+    environment:
+      DNS_PORT: "5354"
+      DNS_HEALTH_PORT: "8080"
+      DNS_METRICS_PORT: "9091"
+      DNS_METRICS_BIND_ADDRESS: "0.0.0.0"
+      DNS_WORKER_THREADS: "${DNS_WORKER_THREADS:-10}"
+      DNS_WORKER_QUEUE_CAPACITY: "${DNS_WORKER_QUEUE_CAPACITY:-200}"
+      DNS_MAX_REQUEST_BYTES: "${DNS_MAX_REQUEST_BYTES:-4096}"
+      DNS_REQUESTS_PER_SECOND: "${DNS_REQUESTS_PER_SECOND:-100}"
+      DNS_REQUEST_BURST_CAPACITY: "${DNS_REQUEST_BURST_CAPACITY:-200}"
+      DNS_TCP_MAX_CONNECTIONS: "${DNS_TCP_MAX_CONNECTIONS:-200}"
+      DNS_TCP_MAX_CONNECTIONS_PER_CLIENT: "${DNS_TCP_MAX_CONNECTIONS_PER_CLIENT:-20}"
+      DNS_TCP_ACCEPT_BACKLOG: "${DNS_TCP_ACCEPT_BACKLOG:-128}"
+      DNS_TCP_IDLE_TIMEOUT_MILLIS: "${DNS_TCP_IDLE_TIMEOUT_MILLIS:-10000}"
+      DNS_TCP_MESSAGE_TIMEOUT_MILLIS: "${DNS_TCP_MESSAGE_TIMEOUT_MILLIS:-5000}"
+      DNS_TCP_MAX_QUERIES_PER_CONNECTION: "${DNS_TCP_MAX_QUERIES_PER_CONNECTION:-100}"
+      DNS_TCP_MAX_REQUEST_BYTES: "${DNS_TCP_MAX_REQUEST_BYTES:-65535}"
+      DNS_METRICS_INTERVAL_SECONDS: "${DNS_METRICS_INTERVAL_SECONDS:-60}"
+      DNS_UPSTREAM_TIMEOUT_MILLIS: "${DNS_UPSTREAM_TIMEOUT_MILLIS:-2000}"
+      DNS_UPSTREAM_MAX_ATTEMPTS: "${DNS_UPSTREAM_MAX_ATTEMPTS:-2}"
+      DNS_UPSTREAM_PORT: "53"
+      DNS_POLICY_MODE: "REQUIRED"
+      DNS_POLICY_SNAPSHOT_URL: "http://admin-api:8081/api/v1/internal/policy-snapshot"
+      DNS_POLICY_TOKEN_FILE: "/run/secrets/policy-snapshot-reader-token"
+      DNS_POLICY_ALLOW_INSECURE_HTTP: "true"
+      DNS_POLICY_CONNECT_TIMEOUT_MILLIS: "${DNS_POLICY_CONNECT_TIMEOUT_MILLIS:-2000}"
+      DNS_POLICY_REQUEST_TIMEOUT_MILLIS: "${DNS_POLICY_REQUEST_TIMEOUT_MILLIS:-5000}"
+      DNS_POLICY_REFRESH_INTERVAL_MILLIS: "${DNS_POLICY_REFRESH_INTERVAL_MILLIS:-30000}"
+      DNS_POLICY_INITIAL_BACKOFF_MILLIS: "${DNS_POLICY_INITIAL_BACKOFF_MILLIS:-1000}"
+      DNS_POLICY_MAX_BACKOFF_MILLIS: "${DNS_POLICY_MAX_BACKOFF_MILLIS:-30000}"
+      DNS_POLICY_MAX_RESPONSE_BYTES: "${DNS_POLICY_MAX_RESPONSE_BYTES:-1048576}"
+      DNS_POLICY_MAX_RULES: "${DNS_POLICY_MAX_RULES:-10000}"
+    secrets:
+      - source: policy-snapshot-reader-token
+        target: policy-snapshot-reader-token
+        mode: 0444
+    depends_on:
+      admin-api:
+        condition: service_healthy
+    ports:
+      - "${STAGING_DNS_BIND_ADDRESS:?Set STAGING_DNS_BIND_ADDRESS to the private host IP}:${STAGING_DNS_PORT:-5354}:5354/udp"
+      - "${STAGING_DNS_BIND_ADDRESS:?Set STAGING_DNS_BIND_ADDRESS to the private host IP}:${STAGING_DNS_PORT:-5354}:5354/tcp"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - dns-egress
+      - observability
+      - policy-distribution
+
+  admin-api:
+    platform: linux/amd64
+    pull_policy: always
+    environment:
+      DNS_ADMIN_PORT: "8081"
+      DNS_ADMIN_BIND_ADDRESS: "0.0.0.0"
+      DNS_ADMIN_DB_URL: "jdbc:postgresql://postgres:5432/${DNS_ADMIN_DB_NAME:-dns_admin}"
+      DNS_ADMIN_DB_USERNAME: "${DNS_ADMIN_DB_USERNAME:-dns_admin}"
+      DNS_ADMIN_DB_POOL_SIZE: "${DNS_ADMIN_DB_POOL_SIZE:-5}"
+      SPRING_CONFIG_IMPORT: "configtree:/run/secrets/"
+    secrets:
+      - source: postgres-password
+        target: spring.datasource.password
+        mode: 0444
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${STAGING_ADMIN_PORT:-8081}:8081"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - control-plane
+      - policy-distribution
+
+  postgres:
+    image: docker.io/library/postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    platform: linux/amd64
+    pull_policy: always
+    environment:
+      POSTGRES_DB: "${DNS_ADMIN_DB_NAME:-dns_admin}"
+      POSTGRES_USER: "${DNS_ADMIN_DB_USERNAME:-dns_admin}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - source: postgres-password
+        target: postgres-password
+        mode: 0444
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - control-plane
+
+  prometheus:
+    image: docker.io/prom/prometheus@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
+    platform: linux/amd64
+    pull_policy: always
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-7d}"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${STAGING_PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - http://127.0.0.1:9090/-/ready
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - observability
+
+  grafana:
+    image: docker.io/grafana/grafana@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
+    platform: linux/amd64
+    pull_policy: always
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://127.0.0.1:${STAGING_GRAFANA_PORT:-3000}"
+    secrets:
+      - source: grafana-admin-password
+        target: grafana-admin-password
+        mode: 0444
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${STAGING_GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - --quiet
+        - http://127.0.0.1:3000/api/health
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - observability
+
+secrets:
+  postgres-password:
+    file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the root-owned secret directory}/postgres-password"
+  grafana-admin-password:
+    file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the root-owned secret directory}/grafana-admin-password"
+  policy-snapshot-reader-token:
+    file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the root-owned secret directory}/policy-snapshot-reader-token"
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  dns-egress:
+    driver: bridge
+  control-plane:
+    driver: bridge
+    internal: true
+  observability:
+    driver: bridge
+    internal: true
+  policy-distribution:
+    driver: bridge
+    internal: true

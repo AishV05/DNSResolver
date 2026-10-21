@@ -1,6 +1,7 @@
 package com.ayushman.dns.server;
 
 import java.net.DatagramPacket;
+import java.net.InetAddress;
 
 /**
  * Keeps oversized or rate-limited packets out of the resolver worker queue.
@@ -51,13 +52,28 @@ public final class RequestAdmissionController {
             DatagramPacket requestPacket
     ) {
 
-        if (requestPacket == null
-                || requestPacket.getAddress() == null
-                || requestPacket.getLength() > maxRequestBytes) {
+        if (requestPacket == null) {
             return Decision.OVERSIZED;
         }
 
-        if (!rateLimiter.tryAcquire(requestPacket.getAddress())) {
+        return decide(
+                requestPacket.getAddress(),
+                requestPacket.getLength()
+        );
+    }
+
+    Decision decide(
+            InetAddress client,
+            int requestLength
+    ) {
+
+        if (client == null
+                || requestLength <= 0
+                || requestLength > maxRequestBytes) {
+            return Decision.OVERSIZED;
+        }
+
+        if (!rateLimiter.tryAcquire(client)) {
             return Decision.RATE_LIMITED;
         }
 

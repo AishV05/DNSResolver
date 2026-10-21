@@ -1,8 +1,8 @@
 package com.ayushman.dns.policy;
 
 /**
- * Policy actions stored by the control plane. Enforcement is deliberately a
- * later data-plane concern, once versioned policy snapshots are available.
+ * Policy actions published by the control plane and enforced from an
+ * immutable data-plane snapshot.
  */
 public enum DnsPolicyAction {
     BLOCK

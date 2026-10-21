@@ -19,12 +19,17 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = "spring.datasource.url=jdbc:h2:mem:admin_security_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE"
 )
 @ActiveProfiles("test")
+@TestPropertySource(properties = {
+        "dns.admin.bootstrap.username=test-bootstrap-admin",
+        "dns.admin.bootstrap.token=test-bootstrap-token-at-least-thirty-two-characters"
+})
 class AdminApiSecurityTest {
 
     @LocalServerPort

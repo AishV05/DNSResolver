@@ -6,5 +6,6 @@ package com.ayushman.dns.admin.security;
 public enum AdminRole {
     VIEWER,
     POLICY_EDITOR,
+    POLICY_SNAPSHOT_READER,
     ADMIN
 }

@@ -12,7 +12,7 @@ import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
 
-public class RecursiveResolver {
+public class RecursiveResolver implements DnsResolver {
 
     private final UpstreamDnsClient client;
 
@@ -62,6 +62,7 @@ public class RecursiveResolver {
         this.rootServers = List.copyOf(rootServers);
     }
 
+    @Override
     public DnsMessage resolve(DnsMessage clientQuery)
             throws Exception {
 

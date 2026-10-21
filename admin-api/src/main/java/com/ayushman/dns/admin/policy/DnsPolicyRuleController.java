@@ -16,8 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 /**
- * CRUD API for durable policy-control-plane records. A created rule is not
- * considered live DNS enforcement until a future snapshot consumer applies it.
+ * CRUD API for durable policy-control-plane records. Enabled rules are
+ * distributed to resolvers through versioned snapshots.
  */
 @RestController
 @RequestMapping("/api/v1/admin/policies")

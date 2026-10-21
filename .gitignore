@@ -70,7 +70,29 @@ logs/
 !.env.example
 config/*.env*
 !config/*.env.example
+config/policy-snapshot-reader-token
 
 # Local embedded database files
 data/
 *.mv.db
+
+# Locally generated, reproducible release bundles
+/dist/
+/.dist-release.*/
+
+# Locally generated container publication receipts
+/publication/
+/.publication.*/
+
+# Locally assembled permanent-release handoffs
+/release-assets-v*/
+/.release-assets.*/
+/verified-release-v*/
+
+# Locally generated private-staging deployment bundles
+/staging-deployment-v*/
+/.staging-deployment.*/
+
+# Staging host configuration belongs outside Git. Keep only the example.
+deploy/staging/*.env
+!deploy/staging/*.env.example

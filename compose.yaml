@@ -2,12 +2,155 @@ services:
   dns-server:
     build:
       context: .
+      dockerfile: Dockerfile
     environment:
       DNS_PORT: ${DNS_PORT:-5354}
       DNS_HEALTH_PORT: ${DNS_HEALTH_PORT:-8080}
+      # The metrics listener is reachable from the container's attached
+      # networks. It is deliberately not published to the host.
+      DNS_METRICS_PORT: "9091"
+      DNS_METRICS_BIND_ADDRESS: "0.0.0.0"
       DNS_REQUESTS_PER_SECOND: ${DNS_REQUESTS_PER_SECOND:-100}
       DNS_REQUEST_BURST_CAPACITY: ${DNS_REQUEST_BURST_CAPACITY:-200}
+      DNS_TCP_MAX_CONNECTIONS: ${DNS_TCP_MAX_CONNECTIONS:-200}
+      DNS_TCP_MAX_CONNECTIONS_PER_CLIENT: ${DNS_TCP_MAX_CONNECTIONS_PER_CLIENT:-20}
+      DNS_TCP_ACCEPT_BACKLOG: ${DNS_TCP_ACCEPT_BACKLOG:-128}
+      DNS_TCP_IDLE_TIMEOUT_MILLIS: ${DNS_TCP_IDLE_TIMEOUT_MILLIS:-10000}
+      DNS_TCP_MESSAGE_TIMEOUT_MILLIS: ${DNS_TCP_MESSAGE_TIMEOUT_MILLIS:-5000}
+      DNS_TCP_MAX_QUERIES_PER_CONNECTION: ${DNS_TCP_MAX_QUERIES_PER_CONNECTION:-100}
+      DNS_TCP_MAX_REQUEST_BYTES: ${DNS_TCP_MAX_REQUEST_BYTES:-65535}
       DNS_UPSTREAM_TIMEOUT_MILLIS: ${DNS_UPSTREAM_TIMEOUT_MILLIS:-2000}
       DNS_UPSTREAM_MAX_ATTEMPTS: ${DNS_UPSTREAM_MAX_ATTEMPTS:-2}
+      DNS_POLICY_MODE: "REQUIRED"
+      DNS_POLICY_SNAPSHOT_URL: "http://admin-api:8081/api/v1/internal/policy-snapshot"
+      DNS_POLICY_TOKEN_FILE: "/run/secrets/policy-snapshot-reader-token"
+      DNS_POLICY_ALLOW_INSECURE_HTTP: "true"
+      DNS_POLICY_CONNECT_TIMEOUT_MILLIS: ${DNS_POLICY_CONNECT_TIMEOUT_MILLIS:-2000}
+      DNS_POLICY_REQUEST_TIMEOUT_MILLIS: ${DNS_POLICY_REQUEST_TIMEOUT_MILLIS:-5000}
+      DNS_POLICY_REFRESH_INTERVAL_MILLIS: ${DNS_POLICY_REFRESH_INTERVAL_MILLIS:-30000}
+      DNS_POLICY_INITIAL_BACKOFF_MILLIS: ${DNS_POLICY_INITIAL_BACKOFF_MILLIS:-1000}
+      DNS_POLICY_MAX_BACKOFF_MILLIS: ${DNS_POLICY_MAX_BACKOFF_MILLIS:-30000}
+      DNS_POLICY_MAX_RESPONSE_BYTES: ${DNS_POLICY_MAX_RESPONSE_BYTES:-1048576}
+      DNS_POLICY_MAX_RULES: ${DNS_POLICY_MAX_RULES:-10000}
+    secrets:
+      - source: policy-snapshot-reader-token
+        target: policy-snapshot-reader-token
+        mode: 0444
+    depends_on:
+      admin-api:
+        condition: service_healthy
     ports:
       - "${DNS_PORT:-5354}:${DNS_PORT:-5354}/udp"
+      - "${DNS_PORT:-5354}:${DNS_PORT:-5354}/tcp"
+    networks:
+      - dns-network
+      - observability
+      - policy-distribution
+
+  prometheus:
+    image: prom/prometheus:v3.13.1@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-7d}"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - observability
+
+  grafana:
+    image: grafana/grafana:12.3.1@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in config/local.env}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://127.0.0.1:${GRAFANA_PORT:-3000}"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - observability
+
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: "${DNS_ADMIN_DB_NAME:-dns_admin}"
+      POSTGRES_USER: "${DNS_ADMIN_DB_USERNAME:?Set DNS_ADMIN_DB_USERNAME in config/local.env}"
+      POSTGRES_PASSWORD: "${DNS_ADMIN_DB_PASSWORD:?Set DNS_ADMIN_DB_PASSWORD in config/local.env}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - control-plane
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin-api
+    environment:
+      DNS_ADMIN_PORT: "8081"
+      DNS_ADMIN_BIND_ADDRESS: "0.0.0.0"
+      DNS_ADMIN_DB_URL: "jdbc:postgresql://postgres:5432/${DNS_ADMIN_DB_NAME:-dns_admin}"
+      DNS_ADMIN_DB_USERNAME: "${DNS_ADMIN_DB_USERNAME:?Set DNS_ADMIN_DB_USERNAME in config/local.env}"
+      DNS_ADMIN_DB_PASSWORD: "${DNS_ADMIN_DB_PASSWORD:?Set DNS_ADMIN_DB_PASSWORD in config/local.env}"
+      DNS_ADMIN_DB_POOL_SIZE: "${DNS_ADMIN_DB_POOL_SIZE:-5}"
+      DNS_ADMIN_BOOTSTRAP_USERNAME: "${DNS_ADMIN_BOOTSTRAP_USERNAME:-}"
+      DNS_ADMIN_BOOTSTRAP_TOKEN: "${DNS_ADMIN_BOOTSTRAP_TOKEN:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DNS_ADMIN_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "java", "-Dloader.main=com.ayushman.dns.admin.AdminApiHealthCheck", "-cp", "/app/dns-admin-api.jar", "org.springframework.boot.loader.launch.PropertiesLauncher", "8081"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    networks:
+      - control-plane
+      - policy-distribution
+
+secrets:
+  policy-snapshot-reader-token:
+    file: "${DNS_POLICY_READER_TOKEN_FILE:-./config/policy-snapshot-reader-token}"
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  dns-network:
+  control-plane:
+  observability:
+  policy-distribution:
+    internal: true

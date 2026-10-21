@@ -1,0 +1,99 @@
+groups:
+  - name: dns-resolver
+    rules:
+      - alert: DnsServerTargetDown
+        expr: up{job="dns-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DNS server metrics target is down
+          description: >-
+            Prometheus has been unable to scrape dns-server metrics for at
+            least two minutes. Check the DNS container, its metrics listener,
+            and the observability network.
+
+      - alert: DnsUdpListenerDown
+        expr: dns_transport_listener_running{transport="udp"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DNS UDP listener reports down
+          description: >-
+            The DNS metrics endpoint is reachable, but the UDP listener has
+            reported not running for at least two minutes. Check the DNS
+            server logs and the UDP port binding.
+
+      - alert: DnsTcpListenerDown
+        expr: dns_transport_listener_running{transport="tcp"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DNS TCP listener reports down
+          description: >-
+            The DNS metrics endpoint is reachable, but the TCP listener has
+            reported not running for at least two minutes. Check the DNS
+            server logs and the TCP port binding.
+
+      - alert: DnsResolverFailuresHigh
+        expr: sum(increase(dns_resolver_failures_total[5m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS resolver failures are elevated
+          description: >-
+            At least five resolver failures occurred in the trailing
+            five-minute window for five minutes. Check upstream reachability,
+            resolver logs, and timeout settings.
+
+      - alert: DnsAdmissionDropsHigh
+        expr: sum(increase(dns_request_drops_total[5m])) / clamp_min(sum(increase(dns_requests_received_total[5m])), 1) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS admission drops exceed 10 percent
+          description: >-
+            More than 10 percent of received DNS requests have been dropped
+            at admission for five minutes. Inspect the drop reason and host
+            resource pressure before changing limits.
+
+      - alert: DnsPolicyNotReady
+        expr: dns_policy_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Required DNS policy has no active snapshot
+          description: >-
+            Policy mode is REQUIRED but no valid initial snapshot has been
+            loaded for at least two minutes. DNS queries fail closed until
+            authentication, control-plane reachability, and snapshot
+            validation succeed.
+
+      - alert: DnsPolicySyncStale
+        expr: dns_policy_sync_stale == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS policy synchronization is stale
+          description: >-
+            The resolver is serving its last-known-good policy, but no valid
+            snapshot response has arrived within the runtime-derived stale
+            threshold. Check the policy endpoint, reader token, and DNS logs.
+
+      - alert: DnsPolicySyncFailures
+        expr: increase(dns_policy_sync_results_total{result="failure"}[5m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS policy synchronization is repeatedly failing
+          description: >-
+            At least three policy synchronization attempts failed in the
+            trailing five-minute window for five minutes. The active
+            last-known-good snapshot, if present, remains in use.

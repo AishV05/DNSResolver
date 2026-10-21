@@ -55,8 +55,19 @@ class AdminSecurityConfiguration {
                         ).permitAll()
                         .requestMatchers(
                                 HttpMethod.GET,
+                                "/api/v1/internal/policy-snapshot"
+                        ).hasAnyRole(
+                                AdminRole.POLICY_SNAPSHOT_READER.name(),
+                                AdminRole.ADMIN.name()
+                        )
+                        .requestMatchers(
+                                HttpMethod.GET,
                                 "/api/v1/admin/auth/me"
-                        ).authenticated()
+                        ).hasAnyRole(
+                                AdminRole.VIEWER.name(),
+                                AdminRole.POLICY_EDITOR.name(),
+                                AdminRole.ADMIN.name()
+                        )
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/admin/status",

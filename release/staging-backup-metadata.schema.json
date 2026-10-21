@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform staging PostgreSQL backup metadata",
+  "description": "Structural contract for an owner-only private staging PostgreSQL custom-format backup.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "environment",
+    "releaseTag",
+    "sourceCommit",
+    "createdAt",
+    "database",
+    "format",
+    "filename",
+    "sizeBytes",
+    "sha256"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "environment": {
+      "const": "staging"
+    },
+    "releaseTag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+    },
+    "database": {
+      "const": "postgresql"
+    },
+    "format": {
+      "const": "custom"
+    },
+    "filename": {
+      "type": "string",
+      "pattern": "^postgres-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-[0-9]{8}T[0-9]{6}Z\\.dump$"
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

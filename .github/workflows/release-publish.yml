@@ -1,0 +1,1186 @@
+name: Release publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ADMIN_IMAGE: ghcr.io/aishv05/dns-admin-api
+  DNS_IMAGE: ghcr.io/aishv05/dns-resolver
+
+jobs:
+  prepare-release-images:
+    name: Prepare and scan release images
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.candidate.outputs.artifact_name }}
+      archive_sha256: ${{ steps.candidate.outputs.archive_sha256 }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Check out tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate trusted release identity
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            printf 'Release publication requires a tag event.\n' >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Release tag must use strict SemVer form vMAJOR.MINOR.PATCH.\n' >&2
+            exit 1
+          fi
+          commit="$(git rev-parse HEAD)"
+          if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != "tag" ]]; then
+            printf 'Release tag must be annotated.\n' >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" != "${commit}" ]]; then
+            printf 'Checked-out commit does not match the release tag.\n' >&2
+            exit 1
+          fi
+          if [[ "$(git tag --points-at HEAD)" != "${RELEASE_TAG}" ]]; then
+            printf 'Exactly one release tag must point at the commit.\n' >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
+            printf 'Release commit must be reachable from origin/main.\n' >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            printf 'Release checkout must be clean.\n' >&2
+            exit 1
+          fi
+          commit_epoch="$(git show -s --format=%ct HEAD)"
+          build_date="$(python3 - "${commit_epoch}" <<'PY'
+          from datetime import datetime, timezone
+          import sys
+
+          print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+          PY
+          )"
+          {
+            printf 'version=%s\n' "${RELEASE_TAG#v}"
+            printf 'commit=%s\n' "${commit}"
+            printf 'commit_epoch=%s\n' "${commit_epoch}"
+            printf 'build_date=%s\n' "${build_date}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Validate tracked configuration
+        run: ./scripts/validate-compose.sh
+
+      - name: Rebuild and verify the release bundle
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+
+      - name: Build exact linux/amd64 release images
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.commit }}
+          SOURCE_DATE_EPOCH: ${{ steps.release.outputs.commit_epoch }}
+          BUILD_DATE: ${{ steps.release.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          docker build --pull --platform linux/amd64 --provenance=false \
+            --file release/Dockerfile.dns-server \
+            --build-arg "APP_VERSION=${RELEASE_VERSION}" \
+            --build-arg "VCS_REF=${SOURCE_COMMIT}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+            --tag "${DNS_IMAGE}:${RELEASE_VERSION}" \
+            --tag "${DNS_IMAGE}:sha-${SOURCE_COMMIT}" \
+            dist
+          docker build --pull --platform linux/amd64 --provenance=false \
+            --file release/Dockerfile.admin-api \
+            --build-arg "APP_VERSION=${RELEASE_VERSION}" \
+            --build-arg "VCS_REF=${SOURCE_COMMIT}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+            --tag "${ADMIN_IMAGE}:${RELEASE_VERSION}" \
+            --tag "${ADMIN_IMAGE}:sha-${SOURCE_COMMIT}" \
+            dist
+          ./scripts/verify-release-image.sh \
+            dns-server "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${DNS_IMAGE}:${RELEASE_VERSION}"
+          ./scripts/verify-release-image.sh \
+            admin-api "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${ADMIN_IMAGE}:${RELEASE_VERSION}"
+
+      - name: Scan DNS server release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.DNS_IMAGE }}:${{ steps.release.outputs.version }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "true"
+          severity: CRITICAL
+          scanners: vuln
+          version: v0.70.0
+
+      - name: Scan Admin API release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.ADMIN_IMAGE }}:${{ steps.release.outputs.version }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "true"
+          severity: CRITICAL
+          scanners: vuln
+          version: v0.70.0
+
+      - name: Export the scanned candidates
+        id: candidate
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          umask 077
+          candidate_dir="${RUNNER_TEMP}/release-candidate"
+          mkdir -p "${candidate_dir}/release-bundle"
+          cp dist/* "${candidate_dir}/release-bundle/"
+          docker image save \
+            "${DNS_IMAGE}:${RELEASE_VERSION}" \
+            "${DNS_IMAGE}:sha-${SOURCE_COMMIT}" \
+            "${ADMIN_IMAGE}:${RELEASE_VERSION}" \
+            "${ADMIN_IMAGE}:sha-${SOURCE_COMMIT}" \
+            | gzip -1 -n >"${candidate_dir}/release-images.tar.gz"
+          archive_sha256="$(sha256sum "${candidate_dir}/release-images.tar.gz" | cut -d ' ' -f1)"
+          printf '%s  release-images.tar.gz\n' "${archive_sha256}" \
+            >"${candidate_dir}/IMAGE_ARCHIVE_SHA256"
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          artifact_name="release-image-candidates-${RELEASE_VERSION}-${SOURCE_COMMIT}-attempt-${GITHUB_RUN_ATTEMPT}"
+          printf 'archive_sha256=%s\n' "${archive_sha256}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Transfer only the verified release candidates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish-release-images:
+    name: Publish release images
+    needs: prepare-release-images
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: ghcr-publish
+      url: https://github.com/AishV05/DNSResolver/pkgs/container/dns-resolver
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      admin_digest: ${{ steps.publish.outputs.admin_digest }}
+      dns_digest: ${{ steps.publish.outputs.dns_digest }}
+    steps:
+      - name: Check out the same tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate source before loading candidates
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]]
+          [[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
+          [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" == "tag" ]]
+          [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${EXPECTED_COMMIT}" ]]
+          [[ "$(git tag --points-at HEAD)" == "${RELEASE_TAG}" ]]
+          git merge-base --is-ancestor "${EXPECTED_COMMIT}" refs/remotes/origin/main
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Download the exact scanned candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-release-images.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Verify and load the transferred images
+        shell: bash
+        env:
+          ARCHIVE_SHA256: ${{ needs.prepare-release-images.outputs.archive_sha256 }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release-images.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/release-candidate"
+          [[ "${ARCHIVE_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${ARCHIVE_SHA256}" \
+            "${candidate_dir}/release-images.tar.gz" | sha256sum --check --strict -
+          (
+            cd "${candidate_dir}"
+            sha256sum --check --strict IMAGE_ARCHIVE_SHA256
+          )
+          ./scripts/verify-release-bundle.sh "${candidate_dir}/release-bundle"
+          docker image load --input "${candidate_dir}/release-images.tar.gz"
+          ./scripts/verify-release-image.sh \
+            dns-server "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${DNS_IMAGE}:${RELEASE_VERSION}" \
+            "${candidate_dir}/release-bundle"
+          ./scripts/verify-release-image.sh \
+            admin-api "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${ADMIN_IMAGE}:${RELEASE_VERSION}" \
+            "${candidate_dir}/release-bundle"
+
+      - name: Log in to GHCR with the job-scoped token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish or recover matching immutable aliases
+        id: publish
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/published-image-digests"
+          ./scripts/publish-release-images.sh \
+            "${RELEASE_TAG}" "${SOURCE_COMMIT}" "${result}"
+          while IFS='=' read -r name value; do
+            case "${name}" in
+              admin_digest|dns_digest)
+                [[ "${value}" =~ ^sha256:[a-f0-9]{64}$ ]]
+                printf '%s=%s\n' "${name}" "${value}" >>"${GITHUB_OUTPUT}"
+                ;;
+              *)
+                printf 'Unexpected publication output key: %s\n' "${name}" >&2
+                exit 1
+                ;;
+            esac
+          done <"${result}"
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+  record-publication:
+    name: Verify publication and prepare release evidence
+    needs:
+      - prepare-release-images
+      - publish-release-images
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      receipt_artifact_name: ${{ steps.evidence.outputs.receipt_artifact_name }}
+      sbom_artifact_name: ${{ steps.evidence.outputs.sbom_artifact_name }}
+      sbom_checksums_sha256: ${{ steps.evidence.outputs.sbom_checksums_sha256 }}
+    steps:
+      - name: Check out the same tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate published source identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]]
+          [[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
+          [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" == "tag" ]]
+          [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${EXPECTED_COMMIT}" ]]
+          [[ "$(git tag --points-at HEAD)" == "${RELEASE_TAG}" ]]
+          git merge-base --is-ancestor "${EXPECTED_COMMIT}" refs/remotes/origin/main
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Download the verified release identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-release-images.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Recheck the transferred release bundle
+        shell: bash
+        env:
+          ARCHIVE_SHA256: ${{ needs.prepare-release-images.outputs.archive_sha256 }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/release-candidate"
+          [[ "${ARCHIVE_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${ARCHIVE_SHA256}" \
+            "${candidate_dir}/release-images.tar.gz" | sha256sum --check --strict -
+          (
+            cd "${candidate_dir}"
+            sha256sum --check --strict IMAGE_ARCHIVE_SHA256
+          )
+          ./scripts/verify-release-bundle.sh "${candidate_dir}/release-bundle"
+
+      - name: Log in to GHCR with read-only package access
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and remotely verify the publication receipt
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          ADMIN_DIGEST: ${{ needs.publish-release-images.outputs.admin_digest }}
+          DNS_DIGEST: ${{ needs.publish-release-images.outputs.dns_digest }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/release-candidate"
+          receipt_dir="${RUNNER_TEMP}/container-publication"
+          receipt="${receipt_dir}/container-publication-manifest.json"
+          mkdir -p "${receipt_dir}"
+          ./scripts/create-container-publication-manifest.sh \
+            "${RELEASE_TAG}" "${ADMIN_DIGEST}" "${DNS_DIGEST}" \
+            "${candidate_dir}/release-bundle" "${receipt}"
+          ./scripts/verify-container-publication-manifest.sh --remote \
+            "${receipt}" "${candidate_dir}/release-bundle"
+          (
+            cd "${receipt_dir}"
+            sha256sum container-publication-manifest.json \
+              >container-publication-manifest.json.sha256
+          )
+
+      - name: Install the checksum-pinned Syft release
+        shell: bash
+        env:
+          SYFT_VERSION: v1.51.1
+          SYFT_ARCHIVE_SHA256: 8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3
+          SYFT_BINARY_SHA256: abca2def61de9952fa06d3977bb1e064818facb9badfce502b450d3d6846a91f
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/syft-tool"
+          archive="${RUNNER_TEMP}/syft.tar.gz"
+          asset="syft_${SYFT_VERSION#v}_linux_amd64.tar.gz"
+          mkdir -p "${tool_dir}"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors \
+            --output "${archive}" \
+            "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/${asset}"
+          printf '%s  %s\n' "${SYFT_ARCHIVE_SHA256}" "${archive}" \
+            | sha256sum --check --strict -
+          tar -xzf "${archive}" -C "${tool_dir}" syft
+          printf '%s  %s\n' "${SYFT_BINARY_SHA256}" "${tool_dir}/syft" \
+            | sha256sum --check --strict -
+          chmod 500 "${tool_dir}/syft"
+          "${tool_dir}/syft" version
+
+      - name: Generate two reproducible scans of each exact image digest
+        id: evidence
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/release-candidate"
+          receipt_dir="${RUNNER_TEMP}/container-publication"
+          receipt="${receipt_dir}/container-publication-manifest.json"
+          first="${RUNNER_TEMP}/image-sboms-first"
+          second="${RUNNER_TEMP}/image-sboms-second"
+          ./scripts/prepare-release-sboms.sh \
+            "${receipt}" "${candidate_dir}/release-bundle" "${first}" \
+            "${RUNNER_TEMP}/syft-tool/syft"
+          ./scripts/prepare-release-sboms.sh \
+            "${receipt}" "${candidate_dir}/release-bundle" "${second}" \
+            "${RUNNER_TEMP}/syft-tool/syft"
+          for file in SHA256SUMS admin-api.spdx.json dns-server.spdx.json \
+              image-sbom-manifest.json; do
+            if ! cmp --silent "${first}/${file}" "${second}/${file}"; then
+              printf 'Reproducible SBOM mismatch: %s\n' "${file}" >&2
+              exit 1
+            fi
+          done
+          ./scripts/verify-release-sboms.sh \
+            "${first}" "${receipt}" "${candidate_dir}/release-bundle"
+          checksum_digest="$(sha256sum "${first}/SHA256SUMS" | cut -d ' ' -f1)"
+          [[ "${checksum_digest}" =~ ^[a-f0-9]{64}$ ]]
+          receipt_artifact="container-publication-${RELEASE_TAG}-attempt-${GITHUB_RUN_ATTEMPT}"
+          sbom_artifact="image-sboms-${RELEASE_TAG}-attempt-${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'receipt_artifact_name=%s\n' "${receipt_artifact}"
+            printf 'sbom_artifact_name=%s\n' "${sbom_artifact}"
+            printf 'sbom_checksums_sha256=%s\n' "${checksum_digest}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+      - name: Upload the publication receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.evidence.outputs.receipt_artifact_name }}
+          path: ${{ runner.temp }}/container-publication/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload the verified image SBOM evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.evidence.outputs.sbom_artifact_name }}
+          path: ${{ runner.temp }}/image-sboms-first/
+          if-no-files-found: error
+          retention-days: 90
+
+  attest-release-images:
+    name: Attest release images
+    needs:
+      - prepare-release-images
+      - publish-release-images
+      - record-publication
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: ghcr-attest
+      url: https://github.com/AishV05/DNSResolver/attestations
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Download only the verified SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.sbom_artifact_name }}
+          path: ${{ runner.temp }}/image-sboms
+
+      - name: Verify the unprivileged evidence handoff
+        shell: bash
+        env:
+          EXPECTED_CHECKSUM_DIGEST: ${{ needs.record-publication.outputs.sbom_checksums_sha256 }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+          ADMIN_DIGEST: ${{ needs.publish-release-images.outputs.admin_digest }}
+          DNS_DIGEST: ${{ needs.publish-release-images.outputs.dns_digest }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/image-sboms"
+          [[ "${EXPECTED_CHECKSUM_DIGEST}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${EXPECTED_CHECKSUM_DIGEST}" \
+            "${evidence}/SHA256SUMS" | sha256sum --check --strict -
+          (
+            cd "${evidence}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          python3 - \
+            "${evidence}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${ADMIN_DIGEST}" "${DNS_DIGEST}" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          evidence = Path(sys.argv[1])
+          expected_files = {
+              "SHA256SUMS",
+              "admin-api.spdx.json",
+              "dns-server.spdx.json",
+              "image-sbom-manifest.json",
+          }
+          entries = list(evidence.iterdir())
+          if {entry.name for entry in entries} != expected_files:
+              raise SystemExit("Attestation input contains a missing or unexpected file")
+          if any(entry.is_symlink() or not entry.is_file() for entry in entries):
+              raise SystemExit("Attestation input contains a non-regular file")
+          manifest = json.loads(
+              (evidence / "image-sbom-manifest.json").read_text(encoding="utf-8")
+          )
+          if manifest.get("tag") != sys.argv[2]:
+              raise SystemExit("Attestation input tag differs from the workflow tag")
+          if manifest.get("source", {}).get("commit") != sys.argv[3]:
+              raise SystemExit("Attestation input commit differs from the workflow commit")
+          images = manifest.get("images")
+          if not isinstance(images, list) or len(images) != 2:
+              raise SystemExit("Attestation input must describe exactly two images")
+          expected = [
+              ("admin-api", "ghcr.io/aishv05/dns-admin-api", sys.argv[4]),
+              ("dns-server", "ghcr.io/aishv05/dns-resolver", sys.argv[5]),
+          ]
+          for image, identity in zip(images, expected):
+              component, repository, digest = identity
+              if (
+                  image.get("component") != component
+                  or image.get("repository") != repository
+                  or image.get("digest") != digest
+                  or re.fullmatch(r"sha256:[a-f0-9]{64}", digest) is None
+              ):
+                  raise SystemExit(f"Attestation image identity differs for {component}")
+          PY
+
+      - name: Log in to GHCR for OCI attestation writes
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest Admin API provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.ADMIN_IMAGE }}
+          subject-digest: ${{ needs.publish-release-images.outputs.admin_digest }}
+          push-to-registry: "true"
+          create-storage-record: "false"
+
+      - name: Attest Admin API SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.ADMIN_IMAGE }}
+          subject-digest: ${{ needs.publish-release-images.outputs.admin_digest }}
+          sbom-path: ${{ runner.temp }}/image-sboms/admin-api.spdx.json
+          push-to-registry: "true"
+          create-storage-record: "false"
+
+      - name: Attest DNS server provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.DNS_IMAGE }}
+          subject-digest: ${{ needs.publish-release-images.outputs.dns_digest }}
+          push-to-registry: "true"
+          create-storage-record: "false"
+
+      - name: Attest DNS server SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.DNS_IMAGE }}
+          subject-digest: ${{ needs.publish-release-images.outputs.dns_digest }}
+          sbom-path: ${{ runner.temp }}/image-sboms/dns-server.spdx.json
+          push-to-registry: "true"
+          create-storage-record: "false"
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+  verify-release-evidence:
+    name: Verify signed release evidence
+    needs:
+      - prepare-release-images
+      - publish-release-images
+      - record-publication
+      - attest-release-images
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the same tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the verified release identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-release-images.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Download the publication receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.receipt_artifact_name }}
+          path: ${{ runner.temp }}/container-publication
+
+      - name: Download the image SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.sbom_artifact_name }}
+          path: ${{ runner.temp }}/image-sboms
+
+      - name: Recheck transferred evidence before authentication
+        shell: bash
+        env:
+          ARCHIVE_SHA256: ${{ needs.prepare-release-images.outputs.archive_sha256 }}
+          SBOM_CHECKSUMS_SHA256: ${{ needs.record-publication.outputs.sbom_checksums_sha256 }}
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/release-candidate"
+          sboms="${RUNNER_TEMP}/image-sboms"
+          [[ "${ARCHIVE_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${SBOM_CHECKSUMS_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${ARCHIVE_SHA256}" \
+            "${candidate}/release-images.tar.gz" | sha256sum --check --strict -
+          printf '%s  %s\n' "${SBOM_CHECKSUMS_SHA256}" \
+            "${sboms}/SHA256SUMS" | sha256sum --check --strict -
+          (
+            cd "${candidate}"
+            sha256sum --check --strict IMAGE_ARCHIVE_SHA256
+          )
+          (
+            cd "${sboms}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          ./scripts/verify-release-bundle.sh "${candidate}/release-bundle"
+
+      - name: Log in to GHCR with read-only package access
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image digests, SBOMs, and both attestation stores
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/container-publication/container-publication-manifest.json"
+          bundle="${RUNNER_TEMP}/release-candidate/release-bundle"
+          sboms="${RUNNER_TEMP}/image-sboms"
+          ./scripts/verify-container-publication-manifest.sh --remote \
+            "${receipt}" "${bundle}"
+          ./scripts/verify-release-attestations.sh \
+            "${receipt}" "${sboms}" "${bundle}"
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+      - name: Summarize immutable signed image references
+        shell: bash
+        env:
+          ADMIN_DIGEST: ${{ needs.publish-release-images.outputs.admin_digest }}
+          DNS_DIGEST: ${{ needs.publish-release-images.outputs.dns_digest }}
+        run: |
+          {
+            printf '## Verified container release evidence\n\n'
+            printf 'Deploy only these digest references:\n\n'
+            printf -- '- %c%s@%s%c\n' 96 "${ADMIN_IMAGE}" "${ADMIN_DIGEST}" 96
+            printf -- '- %c%s@%s%c\n' 96 "${DNS_IMAGE}" "${DNS_DIGEST}" 96
+            printf '\nEach digest has verified SLSA provenance and SPDX 2.3 '
+            printf 'attestations in both GitHub and GHCR.\n'
+            printf 'No %clatest%c, floating, branch, or short-SHA alias was published.\n' 96 96
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  confirm-release-verification:
+    name: Confirm deterministic release verification
+    needs:
+      - prepare-release-images
+      - verify-release-evidence
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.gate.outputs.run_id }}
+      run_attempt: ${{ steps.gate.outputs.run_attempt }}
+      run_url: ${{ steps.gate.outputs.run_url }}
+    steps:
+      - name: Require the exact successful Release verify tag run
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          runs_file="${RUNNER_TEMP}/release-verify-runs.json"
+          for poll in $(seq 1 90); do
+            gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/release-verify.yml/runs" \
+              -f event=push -f head_sha="${SOURCE_COMMIT}" -f per_page=100 \
+              >"${runs_file}"
+            result="$(python3 - \
+              "${runs_file}" "${GITHUB_REPOSITORY}" \
+              "${RELEASE_TAG}" "${SOURCE_COMMIT}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          repository, tag, commit = sys.argv[2:]
+          runs = value.get("workflow_runs") if isinstance(value, dict) else None
+          if not isinstance(runs, list):
+              raise SystemExit("Release verify query did not return workflow_runs")
+          matches = []
+          for run in runs:
+              if not isinstance(run, dict):
+                  continue
+              source_repo = run.get("repository")
+              head_repo = run.get("head_repository")
+              path = run.get("path")
+              if (
+                  run.get("event") == "push"
+                  and run.get("head_sha") == commit
+                  and run.get("head_branch") == tag
+                  and isinstance(source_repo, dict)
+                  and isinstance(head_repo, dict)
+                  and str(source_repo.get("full_name", "")).lower() == repository.lower()
+                  and str(head_repo.get("full_name", "")).lower() == repository.lower()
+                  and isinstance(path, str)
+                  and path.split("@", 1)[0] == ".github/workflows/release-verify.yml"
+              ):
+                  matches.append(run)
+          if len(matches) > 1:
+              raise SystemExit("Multiple Release verify push runs match this tag and commit")
+          if not matches:
+              print("WAIT")
+              raise SystemExit(0)
+          run = matches[0]
+          status = run.get("status")
+          conclusion = run.get("conclusion")
+          if status != "completed":
+              if status not in {"queued", "in_progress", "requested", "pending", "waiting"}:
+                  raise SystemExit(f"Unexpected Release verify status: {status!r}")
+              print("WAIT")
+              raise SystemExit(0)
+          if conclusion != "success":
+              raise SystemExit(f"Release verify concluded with {conclusion!r}")
+          run_id = run.get("id")
+          run_attempt = run.get("run_attempt")
+          if (
+              not isinstance(run_id, int)
+              or isinstance(run_id, bool)
+              or run_id <= 0
+              or not isinstance(run_attempt, int)
+              or isinstance(run_attempt, bool)
+              or run_attempt <= 0
+          ):
+              raise SystemExit("Release verify run identity is invalid")
+          print(f"SUCCESS\t{run_id}\t{run_attempt}")
+          PY
+            )"
+            if [[ "${result}" == WAIT ]]; then
+              if [[ "${poll}" -eq 90 ]]; then
+                printf 'Timed out waiting for Release verify.\n' >&2
+                exit 1
+              fi
+              sleep 10
+              continue
+            fi
+            IFS=$'\t' read -r state run_id run_attempt <<<"${result}"
+            [[ "${state}" == SUCCESS ]]
+            [[ "${run_id}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${run_attempt}" =~ ^[1-9][0-9]*$ ]]
+            {
+              printf 'run_id=%s\n' "${run_id}"
+              printf 'run_attempt=%s\n' "${run_attempt}"
+              printf 'run_url=https://github.com/%s/actions/runs/%s\n' \
+                "${GITHUB_REPOSITORY}" "${run_id}"
+            } >>"${GITHUB_OUTPUT}"
+            exit 0
+          done
+
+  prepare-github-release-assets:
+    name: Prepare permanent release assets
+    needs:
+      - prepare-release-images
+      - record-publication
+      - confirm-release-verification
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.handoff.outputs.artifact_name }}
+      checksums_sha256: ${{ steps.handoff.outputs.checksums_sha256 }}
+      manifest_sha256: ${{ steps.handoff.outputs.manifest_sha256 }}
+      publisher_artifact_name: ${{ steps.handoff.outputs.publisher_artifact_name }}
+      publisher_sha256: ${{ steps.handoff.outputs.publisher_sha256 }}
+    steps:
+      - name: Check out the same tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the verified release identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-release-images.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Download the publication receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.receipt_artifact_name }}
+          path: ${{ runner.temp }}/container-publication
+
+      - name: Download the image SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.sbom_artifact_name }}
+          path: ${{ runner.temp }}/image-sboms
+
+      - name: Recheck every transferred evidence layer
+        shell: bash
+        env:
+          ARCHIVE_SHA256: ${{ needs.prepare-release-images.outputs.archive_sha256 }}
+          SBOM_CHECKSUMS_SHA256: ${{ needs.record-publication.outputs.sbom_checksums_sha256 }}
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/release-candidate"
+          receipt="${RUNNER_TEMP}/container-publication"
+          sboms="${RUNNER_TEMP}/image-sboms"
+          [[ "${ARCHIVE_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${SBOM_CHECKSUMS_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${ARCHIVE_SHA256}" \
+            "${candidate}/release-images.tar.gz" | sha256sum --check --strict -
+          printf '%s  %s\n' "${SBOM_CHECKSUMS_SHA256}" \
+            "${sboms}/SHA256SUMS" | sha256sum --check --strict -
+          (
+            cd "${candidate}"
+            sha256sum --check --strict IMAGE_ARCHIVE_SHA256
+          )
+          (
+            cd "${receipt}"
+            sha256sum --check --strict container-publication-manifest.json.sha256
+          )
+          (
+            cd "${sboms}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          ./scripts/verify-release-sboms.sh \
+            "${sboms}" \
+            "${receipt}/container-publication-manifest.json" \
+            "${candidate}/release-bundle"
+
+      - name: Create and verify the exact nine permanent assets
+        id: handoff
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/github-release-assets"
+          ./scripts/create-release-assets.sh \
+            "${RUNNER_TEMP}/release-candidate/release-bundle" \
+            "${RUNNER_TEMP}/container-publication/container-publication-manifest.json" \
+            "${RUNNER_TEMP}/image-sboms" \
+            "${output}"
+          ./scripts/verify-release-assets.sh "${output}"
+          checksums_sha256="$(sha256sum "${output}/SHA256SUMS" | cut -d ' ' -f1)"
+          manifest_sha256="$(sha256sum \
+            "${output}/release-assets-manifest.json" | cut -d ' ' -f1)"
+          [[ "${checksums_sha256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${manifest_sha256}" =~ ^[a-f0-9]{64}$ ]]
+          artifact_name="github-release-assets-${RELEASE_TAG}-attempt-${GITHUB_RUN_ATTEMPT}"
+          publisher_dir="${RUNNER_TEMP}/github-release-publisher"
+          mkdir "${publisher_dir}"
+          cp ./scripts/publish-github-release.py "${publisher_dir}/"
+          publisher_sha256="$(sha256sum \
+            "${publisher_dir}/publish-github-release.py" | cut -d ' ' -f1)"
+          [[ "${publisher_sha256}" =~ ^[a-f0-9]{64}$ ]]
+          publisher_artifact_name="github-release-publisher-${RELEASE_TAG}-attempt-${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'artifact_name=%s\n' "${artifact_name}"
+            printf 'checksums_sha256=%s\n' "${checksums_sha256}"
+            printf 'manifest_sha256=%s\n' "${manifest_sha256}"
+            printf 'publisher_artifact_name=%s\n' "${publisher_artifact_name}"
+            printf 'publisher_sha256=%s\n' "${publisher_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Transfer only the verified permanent asset set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.handoff.outputs.artifact_name }}
+          path: ${{ runner.temp }}/github-release-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Transfer only the checksummed publisher helper
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.handoff.outputs.publisher_artifact_name }}
+          path: ${{ runner.temp }}/github-release-publisher/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish-github-release:
+    name: Publish immutable GitHub Release
+    needs:
+      - prepare-release-images
+      - confirm-release-verification
+      - prepare-github-release-assets
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: github-release
+      url: https://github.com/AishV05/DNSResolver/releases
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release_id: ${{ steps.publish.outputs.release_id }}
+      release_url: ${{ steps.publish.outputs.release_url }}
+    steps:
+      - name: Download the exact permanent release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-github-release-assets.outputs.artifact_name }}
+          path: ${{ runner.temp }}/github-release-assets
+
+      - name: Download the single-purpose publisher helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-github-release-assets.outputs.publisher_artifact_name }}
+          path: ${{ runner.temp }}/github-release-publisher
+
+      - name: Revalidate the independent Release verify run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+          VERIFY_RUN_ID: ${{ needs.confirm-release-verification.outputs.run_id }}
+          VERIFY_RUN_ATTEMPT: ${{ needs.confirm-release-verification.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${VERIFY_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${VERIFY_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${VERIFY_RUN_ID}" \
+            >"${RUNNER_TEMP}/release-verify-run.json"
+          python3 - \
+            "${RUNNER_TEMP}/release-verify-run.json" \
+            "${GITHUB_REPOSITORY}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${VERIFY_RUN_ID}" "${VERIFY_RUN_ATTEMPT}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          repository, tag, commit, run_id, run_attempt = sys.argv[2:]
+          source_repo = run.get("repository") if isinstance(run, dict) else None
+          head_repo = run.get("head_repository") if isinstance(run, dict) else None
+          path = run.get("path") if isinstance(run, dict) else None
+          if not (
+              isinstance(source_repo, dict)
+              and isinstance(head_repo, dict)
+              and str(source_repo.get("full_name", "")).lower() == repository.lower()
+              and str(head_repo.get("full_name", "")).lower() == repository.lower()
+              and run.get("event") == "push"
+              and run.get("head_branch") == tag
+              and run.get("head_sha") == commit
+              and isinstance(path, str)
+              and path.split("@", 1)[0] == ".github/workflows/release-verify.yml"
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+              and str(run.get("id")) == run_id
+              and str(run.get("run_attempt")) == run_attempt
+          ):
+              raise SystemExit("Independent Release verify run no longer matches")
+          PY
+
+      - name: Verify the write-boundary handoff
+        shell: bash
+        env:
+          EXPECTED_CHECKSUMS_SHA256: ${{ needs.prepare-github-release-assets.outputs.checksums_sha256 }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare-github-release-assets.outputs.manifest_sha256 }}
+          EXPECTED_PUBLISHER_SHA256: ${{ needs.prepare-github-release-assets.outputs.publisher_sha256 }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/github-release-assets"
+          publisher="${RUNNER_TEMP}/github-release-publisher/publish-github-release.py"
+          [[ "${EXPECTED_CHECKSUMS_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${EXPECTED_MANIFEST_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${EXPECTED_PUBLISHER_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${EXPECTED_CHECKSUMS_SHA256}" \
+            "${assets}/SHA256SUMS" | sha256sum --check --strict -
+          printf '%s  %s\n' "${EXPECTED_MANIFEST_SHA256}" \
+            "${assets}/release-assets-manifest.json" | sha256sum --check --strict -
+          printf '%s  %s\n' "${EXPECTED_PUBLISHER_SHA256}" \
+            "${publisher}" | sha256sum --check --strict -
+          [[ "$(find "${RUNNER_TEMP}/github-release-publisher" \
+            -mindepth 1 -maxdepth 1 -printf '%f %y\n')" == \
+            'publish-github-release.py f' ]]
+          (
+            cd "${assets}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          python3 - "${assets}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          assets = Path(sys.argv[1])
+          tag, commit = sys.argv[2:]
+          version = tag[1:]
+          expected = {
+              f"admin-api-{version}.jar",
+              "admin-api.spdx.json",
+              "container-publication-manifest.json",
+              f"dns-server-{version}.jar",
+              "dns-server.spdx.json",
+              "image-sbom-manifest.json",
+              "release-assets-manifest.json",
+              "release-manifest.json",
+              "SHA256SUMS",
+          }
+          entries = list(assets.iterdir())
+          if {entry.name for entry in entries} != expected:
+              raise SystemExit("Permanent release asset set differs at write boundary")
+          if any(entry.is_symlink() or not entry.is_file() for entry in entries):
+              raise SystemExit("Permanent release handoff contains a non-regular file")
+          manifest = json.loads(
+              (assets / "release-assets-manifest.json").read_text(encoding="utf-8")
+          )
+          if (
+              manifest.get("version") != version
+              or manifest.get("tag") != tag
+              or manifest.get("source", {}).get("commit") != commit
+          ):
+              raise SystemExit("Permanent release handoff identity differs")
+          PY
+
+      - name: Create, resume, or accept the exact immutable release
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/github-release-result"
+          python3 "${RUNNER_TEMP}/github-release-publisher/publish-github-release.py" \
+            "${RUNNER_TEMP}/github-release-assets" \
+            "${RELEASE_TAG}" "${SOURCE_COMMIT}" "${result}"
+          expected_keys=$'release_id\nrelease_url'
+          actual_keys="$(cut -d= -f1 "${result}")"
+          [[ "${actual_keys}" == "${expected_keys}" ]]
+          while IFS='=' read -r name value; do
+            case "${name}" in
+              release_id)
+                [[ "${value}" =~ ^[1-9][0-9]*$ ]]
+                ;;
+              release_url)
+                [[ "${value}" == \
+                  "https://github.com/AishV05/DNSResolver/releases/tag/${RELEASE_TAG}" ]]
+                ;;
+              *)
+                printf 'Unexpected publisher output key: %s\n' "${name}" >&2
+                exit 1
+                ;;
+            esac
+            printf '%s=%s\n' "${name}" "${value}" >>"${GITHUB_OUTPUT}"
+          done <"${result}"
+
+  verify-github-release:
+    name: Verify immutable GitHub Release
+    needs:
+      - prepare-release-images
+      - prepare-github-release-assets
+      - publish-github-release
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the same tagged source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Log in to GHCR with read-only package access
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download and verify the permanent release independently
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.prepare-release-images.outputs.commit }}
+          EXPECTED_CHECKSUMS_SHA256: ${{ needs.prepare-github-release-assets.outputs.checksums_sha256 }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/verified-github-release"
+          ./scripts/verify-github-release.sh \
+            "${RELEASE_TAG}" "${SOURCE_COMMIT}" "${output}"
+          [[ "${EXPECTED_CHECKSUMS_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "${EXPECTED_CHECKSUMS_SHA256}" \
+            "${output}/SHA256SUMS" | sha256sum --check --strict -
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+      - name: Summarize the permanent immutable handoff
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_URL: ${{ needs.publish-github-release.outputs.release_url }}
+        run: |
+          {
+            printf '## Immutable GitHub Release verified\n\n'
+            printf -- '- Release: [%s](%s)\n' "${RELEASE_TAG}" "${RELEASE_URL}"
+            printf -- '- Attached assets: 9 exact files\n'
+            printf -- '- GitHub release and per-asset attestations: verified\n'
+            printf -- '- GHCR image aliases, digests, SPDX, and OCI attestations: verified\n'
+            printf '\nNo mutable image alias or deployment was created.\n'
+          } >>"${GITHUB_STEP_SUMMARY}"

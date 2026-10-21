@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # This is the only scrape target. The Admin API is intentionally excluded
+  # until it has a separately designed least-privilege metrics endpoint.
+  - job_name: dns-server
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - dns-server:9091

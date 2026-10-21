@@ -18,8 +18,8 @@ import jakarta.persistence.UniqueConstraint;
 import jakarta.persistence.Version;
 
 /**
- * Durable control-plane record. The UDP server does not read this entity
- * directly; policy distribution is intentionally introduced in a later phase.
+ * Durable control-plane record. The DNS server never reads this entity or the
+ * admin database directly; distribution uses immutable policy snapshots.
  */
 @Entity
 @Table(

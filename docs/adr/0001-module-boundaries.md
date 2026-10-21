@@ -12,7 +12,7 @@ other adapters from using DNS behavior without also depending on server code.
 Use a Maven reactor with four modules:
 
 - `dns-core` contains protocol, cache, and recursive resolver code.
-- `dns-server` contains the runnable UDP and health process and depends on
+- `dns-server` contains the runnable DNS transport and health process and depends on
   `dns-core`.
 - `admin-api` contains the Spring Boot management plane and depends on
   `dns-core`, but not on `dns-server`.

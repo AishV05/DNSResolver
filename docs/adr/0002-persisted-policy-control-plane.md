@@ -2,9 +2,9 @@
 
 ## Context
 
-The platform has separate UDP and HTTP processes. Storing policy records only
+The platform has separate DNS data-plane and HTTP processes. Storing policy records only
 in `admin-api` does not make them visible to a running `dns-server` process.
-Making the UDP request path query the admin database would add latency, create
+Making the DNS request path query the admin database would add latency, create
 a database availability dependency for every query, and violate the module
 boundary established in ADR 0001.
 
@@ -16,14 +16,15 @@ tests, and support PostgreSQL through external datasource configuration.
 
 Policy records normalize DNS domain names, specify an explicit match type, are
 enabled or disabled independently, and use optimistic versioning. The admin
-API labels this state `PERSISTED_NOT_APPLIED` until a future data-plane
-component receives authenticated, versioned policy snapshots.
+API initially labelled this state `PERSISTED_NOT_APPLIED`. Snapshot publication,
+activation, enforcement, telemetry, and deployment wiring are defined in ADRs
+0015-0019. The publisher reports
+`DATA_PLANE_UNOBSERVED` because it still has no per-resolver acknowledgement.
 
 ## Consequences
 
-Policy CRUD is durable and independently testable without touching UDP query
-latency or availability. It is transparent that records do not yet block DNS
-answers. Future enforcement can decorate the framework-free resolver with a
-pure policy evaluator and atomically swap in-memory snapshots; it should
-respond with DNS `REFUSED` rather than misrepresenting blocked names as
-`NXDOMAIN`.
+Policy CRUD is durable and independently testable without touching DNS query
+latency or availability. This persistence decision alone does not block DNS
+answers; the data-plane design decorates the framework-free resolver with a
+pure policy evaluator and atomically swaps in-memory snapshots. A block returns
+DNS `REFUSED` rather than misrepresenting the name as `NXDOMAIN`.

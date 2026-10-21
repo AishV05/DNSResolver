@@ -10,5 +10,17 @@ target
 !.env.example
 config/*.env*
 !config/*.env.example
+config/policy-snapshot-reader-token
 data/
 *.mv.db
+dist/
+.dist-release.*/
+release-assets-v*/
+.release-assets.*/
+verified-release-v*/
+publication/
+.publication.*/
+staging-deployment-v*/
+.staging-deployment.*/
+deploy/staging/*.env
+!deploy/staging/*.env.example

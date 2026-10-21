@@ -1,0 +1,253 @@
+name: Staging deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable vMAJOR.MINOR.PATCH release tag
+        required: true
+        type: string
+      bootstrap:
+        description: Use the first-start bootstrap secret overlay
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dns-platform-private-staging
+  cancel-in-progress: false
+
+jobs:
+  prepare-staging-bundle:
+    name: Prepare verified staging bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    outputs:
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      bundle_checksums_sha256: ${{ steps.identity.outputs.bundle_checksums_sha256 }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate manual release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Invalid release tag: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/tags/${RELEASE_TAG}" ]]; then
+            printf '%s\n' \
+              'Run this workflow from the same immutable tag selected in the tag input.' >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REPOSITORY}" != "AishV05/DNSResolver" ]]; then
+            printf 'Unexpected repository: %s\n' "${GITHUB_REPOSITORY}" >&2
+            exit 1
+          fi
+
+      - name: Check out the immutable release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Resolve annotated tag commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != tag ]]; then
+            printf '%s\n' 'Release tag must be annotated.' >&2
+            exit 1
+          fi
+          source_commit="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          if [[ "$(git rev-parse HEAD)" != "${source_commit}" ]]; then
+            printf '%s\n' 'Checked-out commit differs from the annotated release tag.' >&2
+            exit 1
+          fi
+          printf 'source_commit=%s\n' "${source_commit}" >>"${GITHUB_OUTPUT}"
+
+      - name: Log in read-only to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify immutable release and signed image evidence
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          ./scripts/verify-github-release.sh \
+            "${RELEASE_TAG}" \
+            "${SOURCE_COMMIT}" \
+            "${RUNNER_TEMP}/verified-release"
+
+      - name: Create deterministic staging deployment bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/create-staging-deployment-bundle.sh \
+            "${RUNNER_TEMP}/verified-release" \
+            "${RUNNER_TEMP}/staging-deployment"
+
+      - name: Record deployment handoff identity
+        id: identity
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          checksum="$(sha256sum "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" | cut -d' ' -f1)"
+          artifact="staging-deployment-${RELEASE_TAG}-${SOURCE_COMMIT}-${GITHUB_RUN_ATTEMPT}"
+          printf 'artifact_name=%s\n' "${artifact}" >>"${GITHUB_OUTPUT}"
+          printf 'bundle_checksums_sha256=%s\n' "${checksum}" >>"${GITHUB_OUTPUT}"
+          printf 'source_commit=%s\n' "${SOURCE_COMMIT}" >>"${GITHUB_OUTPUT}"
+          printf 'release_tag=%s\n' "${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload verified staging handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: ${{ runner.temp }}/staging-deployment
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy-private-staging:
+    name: Deploy private staging
+    needs: prepare-staging-bundle
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - dns-staging
+    timeout-minutes: 30
+    environment:
+      name: staging
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    env:
+      EXPECTED_CHECKSUM: ${{ needs.prepare-staging-bundle.outputs.bundle_checksums_sha256 }}
+      RELEASE_TAG: ${{ needs.prepare-staging-bundle.outputs.release_tag }}
+      SOURCE_COMMIT: ${{ needs.prepare-staging-bundle.outputs.source_commit }}
+      STAGING_CONFIG_FILE: ${{ vars.STAGING_CONFIG_FILE || '/etc/dns-platform/staging/staging.env' }}
+      USE_BOOTSTRAP: ${{ inputs.bootstrap }}
+    steps:
+      - name: Check out deployment tooling from the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download exact verified staging handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-staging-bundle.outputs.artifact_name }}
+          path: ${{ runner.temp }}/staging-deployment
+
+      - name: Revalidate handoff and trusted source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_checksum="$(sha256sum "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" | cut -d' ' -f1)"
+          if [[ "${actual_checksum}" != "${EXPECTED_CHECKSUM}" ]]; then
+            printf '%s\n' 'Downloaded deployment handoff checksum differs.' >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "${SOURCE_COMMIT}" ]]; then
+            printf '%s\n' 'Deployment tooling checkout differs from release commit.' >&2
+            exit 1
+          fi
+          ./scripts/verify-staging-deployment-bundle.sh \
+            "${RUNNER_TEMP}/staging-deployment"
+
+      - name: Deploy exact release to private staging
+        shell: bash
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          docker_config="$(mktemp -d "${RUNNER_TEMP}/docker-config.XXXXXX")"
+          cleanup() {
+            local exit_code=$?
+            trap - EXIT INT TERM
+            DOCKER_CONFIG="${docker_config}" docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -rf "${docker_config}"
+            unset GHCR_TOKEN
+            exit "${exit_code}"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '%s' "${GHCR_TOKEN}" \
+            | DOCKER_CONFIG="${docker_config}" docker login ghcr.io \
+                --username "${GHCR_USER}" --password-stdin
+          export DOCKER_CONFIG="${docker_config}"
+          arguments=(
+            "${RUNNER_TEMP}/staging-deployment"
+            "${STAGING_CONFIG_FILE}"
+          )
+          if [[ "${USE_BOOTSTRAP}" == true ]]; then
+            arguments+=(--bootstrap)
+          fi
+          ./scripts/staging-deploy.sh "${arguments[@]}"
+
+      - name: Record non-secret deployment evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/staging-deployment-evidence"
+          mkdir -p "${evidence}"
+          cp "${RUNNER_TEMP}/staging-deployment/staging-deployment-manifest.json" \
+            "${evidence}/"
+          cp "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" "${evidence}/"
+          python3 - "${evidence}/deployment-result.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          value = {
+              "schemaVersion": 1,
+              "environment": "staging",
+              "releaseTag": os.environ["RELEASE_TAG"],
+              "sourceCommit": os.environ["SOURCE_COMMIT"],
+              "workflowRunId": int(os.environ["GITHUB_RUN_ID"]),
+              "workflowRunAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "status": "healthy",
+          }
+          with Path(sys.argv[1]).open(
+              "w",
+              encoding="utf-8",
+              newline="\n",
+          ) as destination:
+              destination.write(json.dumps(value, indent=2) + "\n")
+          PY
+
+      - name: Upload deployment evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-deployment-evidence-${{ needs.prepare-staging-bundle.outputs.release_tag }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-deployment-evidence
+          if-no-files-found: error
+          retention-days: 90

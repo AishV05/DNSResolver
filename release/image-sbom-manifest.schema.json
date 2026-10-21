@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform image SBOM manifest",
+  "description": "Structural contract for a digest-bound SPDX evidence bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "version",
+    "tag",
+    "source",
+    "tool",
+    "publicationReceipt",
+    "images"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "commitTimestamp"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "commitTimestamp": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "spdxVersion"
+      ],
+      "properties": {
+        "name": {
+          "const": "syft"
+        },
+        "version": {
+          "const": "1.51.1"
+        },
+        "spdxVersion": {
+          "const": "SPDX-2.3"
+        }
+      }
+    },
+    "publicationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "sha256"
+      ],
+      "properties": {
+        "filename": {
+          "const": "container-publication-manifest.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/adminApiImage"
+        },
+        {
+          "$ref": "#/$defs/dnsServerImage"
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sbom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "sha256"
+      ],
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "imageBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "digest",
+        "sbom"
+      ],
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "sbom": {
+          "$ref": "#/$defs/sbom"
+        }
+      }
+    },
+    "adminApiImage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "admin-api"
+            },
+            "repository": {
+              "const": "ghcr.io/aishv05/dns-admin-api"
+            },
+            "sbom": {
+              "properties": {
+                "filename": {
+                  "const": "admin-api.spdx.json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "dnsServerImage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "dns-server"
+            },
+            "repository": {
+              "const": "ghcr.io/aishv05/dns-resolver"
+            },
+            "sbom": {
+              "properties": {
+                "filename": {
+                  "const": "dns-server.spdx.json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

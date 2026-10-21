@@ -1,0 +1,29 @@
+ARG APP_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+ARG SOURCE_URL=https://github.com/AishV05/DNSResolver
+
+FROM eclipse-temurin:17-jre-jammy@sha256:ec72ba5962b45ae4e7f96bfb5ebf6eeb34a488b967f937c8e14f0aaec688954f
+
+ARG APP_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+ARG SOURCE_URL
+
+LABEL org.opencontainers.image.title="DNS Resolver" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+RUN groupadd --system dns && useradd --system --gid dns --home /app dns
+WORKDIR /app
+COPY --chown=dns:dns dns-server-${APP_VERSION}.jar /app/dns-resolver.jar
+
+USER dns
+EXPOSE 5354/udp 5354/tcp
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD java -cp /app/dns-resolver.jar com.ayushman.dns.server.HealthCheck ${DNS_HEALTH_PORT:-8080}
+
+ENTRYPOINT ["java", "-jar", "/app/dns-resolver.jar"]

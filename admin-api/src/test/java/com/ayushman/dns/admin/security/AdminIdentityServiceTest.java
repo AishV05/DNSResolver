@@ -85,4 +85,28 @@ class AdminIdentityServiceTest {
 
         verifyNoInteractions(tokenRepository, tokenGenerator);
     }
+
+    @Test
+    void refusesABootstrapTokenThatAuthenticationCouldNeverAccept() {
+        AdminUserRepository userRepository = mock(AdminUserRepository.class);
+        AdminApiTokenRepository tokenRepository = mock(AdminApiTokenRepository.class);
+        OpaqueTokenGenerator tokenGenerator = mock(OpaqueTokenGenerator.class);
+        when(userRepository.count()).thenReturn(0L);
+
+        AdminBootstrapProperties properties = new AdminBootstrapProperties();
+        properties.setUsername("bootstrap-admin");
+        properties.setToken("x".repeat(513));
+
+        AdminIdentityService service = new AdminIdentityService(
+                userRepository,
+                tokenRepository,
+                properties,
+                tokenGenerator
+        );
+
+        assertThatThrownBy(service::bootstrapInitialAdministratorIfRequired)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("32 to 512");
+        verifyNoInteractions(tokenRepository, tokenGenerator);
+    }
 }

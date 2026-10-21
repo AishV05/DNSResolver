@@ -1,0 +1,89 @@
+name: Release verify
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated vMAJOR.MINOR.PATCH tag to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-verify-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic-release-bundle:
+    name: Deterministic release bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Build and verify first isolated bundle
+        run: ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+
+      - name: Preserve first bundle outside the checkout
+        run: mv dist "${RUNNER_TEMP}/release-bundle-first"
+
+      - name: Build and verify second isolated bundle
+        run: ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+
+      - name: Compare reproducible bundle bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          first="${RUNNER_TEMP}/release-bundle-first"
+          for file in SHA256SUMS release-manifest.json \
+              "admin-api-${RELEASE_TAG#v}.jar" \
+              "dns-server-${RELEASE_TAG#v}.jar"; do
+            if ! cmp --silent "${first}/${file}" "dist/${file}"; then
+              printf 'Reproducibility mismatch: %s\n' "${file}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prove tampered and schema-invalid bundles are rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          tampered="${RUNNER_TEMP}/release-bundle-tampered"
+          schema_invalid="${RUNNER_TEMP}/release-bundle-schema-invalid"
+          cp -R dist "${tampered}"
+          cp -R dist "${schema_invalid}"
+          printf 'x' >> "${tampered}/dns-server-${RELEASE_TAG#v}.jar"
+          python3 - "${schema_invalid}/release-manifest.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          manifest["unexpectedField"] = True
+          with path.open("w", encoding="utf-8", newline="\n") as stream:
+              stream.write(json.dumps(manifest, indent=2) + "\n")
+          PY
+          if ./scripts/verify-release-bundle.sh "${tampered}"; then
+            printf 'Tampered bundle unexpectedly passed verification.\n' >&2
+            exit 1
+          fi
+          if ./scripts/verify-release-bundle.sh "${schema_invalid}"; then
+            printf 'Schema-invalid bundle unexpectedly passed verification.\n' >&2
+            exit 1
+          fi
+
+      - name: Show verified bundle filenames
+        run: find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort

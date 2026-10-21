@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /**
  * Framework-free representation of a DNS policy rule shared by control-plane
- * code and future policy-snapshot consumers.
+ * code and policy-snapshot consumers.
  */
 public record DnsPolicyRule(
         String domainName,

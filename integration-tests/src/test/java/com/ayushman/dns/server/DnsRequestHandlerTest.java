@@ -16,7 +16,7 @@ import com.ayushman.dns.protocol.DnsPacketWriter;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
 import com.ayushman.dns.protocol.EdnsInfo;
-import com.ayushman.dns.resolver.RecursiveResolver;
+import com.ayushman.dns.resolver.DnsResolver;
 
 public class DnsRequestHandlerTest {
 
@@ -368,7 +368,7 @@ public class DnsRequestHandlerTest {
     }
 
     private static class StubResolver
-            extends RecursiveResolver {
+            implements DnsResolver {
 
         private final DnsMessage response;
 

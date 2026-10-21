@@ -11,6 +11,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -20,6 +21,10 @@ import org.springframework.test.context.ActiveProfiles;
         }
 )
 @ActiveProfiles("test")
+@TestPropertySource(properties = {
+        "dns.admin.bootstrap.username=test-bootstrap-admin",
+        "dns.admin.bootstrap.token=test-bootstrap-token-at-least-thirty-two-characters"
+})
 class AdminApiApplicationTest {
 
     @LocalServerPort
@@ -44,8 +49,12 @@ class AdminApiApplicationTest {
         assertThat(response.getBody().status()).isEqualTo("UP");
         assertThat(response.getBody().configuredRootServers()).isEqualTo(2);
         assertThat(response.getBody().persistedPolicyRules()).isZero();
+        assertThat(response.getBody().enabledPolicyRules()).isZero();
+        assertThat(response.getBody().publishedPolicyRevision()).isZero();
+        assertThat(response.getBody().policyDistribution())
+                .isEqualTo("SNAPSHOT_AVAILABLE");
         assertThat(response.getBody().policyEnforcement())
-                .isEqualTo("PERSISTED_NOT_APPLIED");
+                .isEqualTo("DATA_PLANE_UNOBSERVED");
     }
 
     @Test

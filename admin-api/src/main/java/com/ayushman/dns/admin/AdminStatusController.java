@@ -2,40 +2,44 @@ package com.ayushman.dns.admin;
 
 import java.util.List;
 
-import com.ayushman.dns.admin.policy.DnsPolicyRuleService;
+import com.ayushman.dns.admin.policy.DnsPolicySnapshotService;
+import com.ayushman.dns.admin.policy.DnsPolicySnapshotService.DnsPolicyPublicationStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Read-only management endpoints. Mutating resolver policy is intentionally
- * deferred until durable storage and authentication are available.
+ * Read-only management endpoints for control-plane and publication state.
  */
 @RestController
 @RequestMapping("/api/v1/admin")
 public class AdminStatusController {
 
     private final AdminApiProperties properties;
-    private final DnsPolicyRuleService policyRuleService;
+    private final DnsPolicySnapshotService policySnapshotService;
 
     public AdminStatusController(
             AdminApiProperties properties,
-            DnsPolicyRuleService policyRuleService
+            DnsPolicySnapshotService policySnapshotService
     ) {
         this.properties = properties;
-        this.policyRuleService = policyRuleService;
+        this.policySnapshotService = policySnapshotService;
     }
 
     @GetMapping("/status")
     public AdminStatusResponse status() {
+        DnsPolicyPublicationStatus publication =
+                policySnapshotService.currentPublicationStatus();
         return new AdminStatusResponse(
                 "dns-admin-api",
                 "UP",
                 "v1",
                 properties.getRootServers().size(),
-                policyRuleService.persistedRuleCount(),
-                policyRuleService.enabledRuleCount(),
-                "PERSISTED_NOT_APPLIED"
+                publication.persistedRuleCount(),
+                publication.enabledRuleCount(),
+                publication.revision(),
+                "SNAPSHOT_AVAILABLE",
+                "DATA_PLANE_UNOBSERVED"
         );
     }
 
@@ -54,6 +58,8 @@ public class AdminStatusController {
             int configuredRootServers,
             long persistedPolicyRules,
             long enabledPolicyRules,
+            long publishedPolicyRevision,
+            String policyDistribution,
             String policyEnforcement
     ) {
     }

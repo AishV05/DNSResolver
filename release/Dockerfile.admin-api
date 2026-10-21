@@ -1,0 +1,37 @@
+ARG APP_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+ARG SOURCE_URL=https://github.com/AishV05/DNSResolver
+
+FROM eclipse-temurin:17-jre-jammy@sha256:ec72ba5962b45ae4e7f96bfb5ebf6eeb34a488b967f937c8e14f0aaec688954f
+
+ARG APP_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+ARG SOURCE_URL
+
+LABEL org.opencontainers.image.title="DNS Resolver Admin API" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+RUN groupadd --system dnsadmin \
+    && useradd --system --gid dnsadmin --home /app dnsadmin \
+    && mkdir -p /app/data \
+    && chown -R dnsadmin:dnsadmin /app
+
+WORKDIR /app
+COPY --chown=dnsadmin:dnsadmin admin-api-${APP_VERSION}.jar /app/dns-admin-api.jar
+
+USER dnsadmin
+EXPOSE 8081
+ENV DNS_ADMIN_BIND_ADDRESS=0.0.0.0
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD java -Dloader.main=com.ayushman.dns.admin.AdminApiHealthCheck \
+        -cp /app/dns-admin-api.jar \
+        org.springframework.boot.loader.launch.PropertiesLauncher \
+        "${DNS_ADMIN_PORT:-8081}"
+
+ENTRYPOINT ["java", "-jar", "/app/dns-admin-api.jar"]

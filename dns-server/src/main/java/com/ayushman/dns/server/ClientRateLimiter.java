@@ -7,7 +7,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
- * Thread-safe, per-client token-bucket rate limiter for UDP requests.
+ * Thread-safe, per-client token-bucket rate limiter shared by both DNS
+ * transports.
  */
 public final class ClientRateLimiter {
 

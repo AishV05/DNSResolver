@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class AdminIdentityService {
 
     private static final int MINIMUM_TOKEN_LENGTH = 32;
+    private static final int MAXIMUM_TOKEN_LENGTH = 512;
 
     private final AdminUserRepository userRepository;
     private final AdminApiTokenRepository tokenRepository;
@@ -144,7 +145,7 @@ public class AdminIdentityService {
     Optional<AdminAuthenticatedPrincipal> authenticate(String rawToken) {
         if (rawToken == null
                 || rawToken.length() < MINIMUM_TOKEN_LENGTH
-                || rawToken.length() > 512
+                || rawToken.length() > MAXIMUM_TOKEN_LENGTH
                 || rawToken.chars().anyMatch(Character::isWhitespace)) {
             return Optional.empty();
         }
@@ -172,9 +173,10 @@ public class AdminIdentityService {
 
     private void validateBootstrapToken(String rawToken) {
         if (rawToken.length() < MINIMUM_TOKEN_LENGTH
+                || rawToken.length() > MAXIMUM_TOKEN_LENGTH
                 || rawToken.chars().anyMatch(Character::isWhitespace)) {
             throw new IllegalArgumentException(
-                    "DNS_ADMIN_BOOTSTRAP_TOKEN must be at least 32 non-whitespace characters"
+                    "DNS_ADMIN_BOOTSTRAP_TOKEN must contain 32 to 512 non-whitespace characters"
             );
         }
     }

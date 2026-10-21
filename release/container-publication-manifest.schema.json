@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform container publication manifest",
+  "description": "Structural contract for the GHCR publication receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "version",
+    "tag",
+    "source",
+    "platform",
+    "images"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      }
+    },
+    "platform": {
+      "const": "linux/amd64"
+    },
+    "images": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/adminApiImage"
+        },
+        {
+          "$ref": "#/$defs/dnsServerImage"
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sourceCommitTag": {
+      "type": "string",
+      "pattern": "^sha-[a-f0-9]{40}$"
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "sourceCommit"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "sourceCommit": {
+          "$ref": "#/$defs/sourceCommitTag"
+        }
+      }
+    },
+    "imageBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "digest",
+        "tags"
+      ],
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "tags": {
+          "$ref": "#/$defs/tags"
+        }
+      }
+    },
+    "adminApiImage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "admin-api"
+            },
+            "repository": {
+              "const": "ghcr.io/aishv05/dns-admin-api"
+            }
+          }
+        }
+      ]
+    },
+    "dnsServerImage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageBase"
+        },
+        {
+          "properties": {
+            "component": {
+              "const": "dns-server"
+            },
+            "repository": {
+              "const": "ghcr.io/aishv05/dns-resolver"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
