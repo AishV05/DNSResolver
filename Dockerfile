@@ -22,7 +22,7 @@ RUN --mount=type=cache,id=dns-platform-maven,target=/root/.m2,sharing=locked \
     mvn -B -ntp -pl dns-server -am -Drevision="${APP_VERSION}" \
         -DskipTests package
 
-FROM eclipse-temurin:17-jre-jammy@sha256:ec72ba5962b45ae4e7f96bfb5ebf6eeb34a488b967f937c8e14f0aaec688954f
+FROM eclipse-temurin:25-jre-jammy@sha256:e0d8c47eccd7ec82d635542dfcd1f2b1293add6bdd7ffbeb650f8ec1b1335425
 
 ARG APP_VERSION
 ARG VCS_REF
