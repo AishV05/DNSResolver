@@ -45,6 +45,19 @@ validate_port() {
     fi
 }
 
+make_policy_token_container_readable() {
+    # Docker Compose implements file-backed secrets as bind mounts on a
+    # native Linux runner, so the source mode is preserved and the long-form
+    # secret `mode` setting is not applied. This token exists only for the
+    # isolated smoke project and is deleted by cleanup; make it readable by
+    # the non-root dns-server process while that project is running.
+    chmod 0444 "${POLICY_TOKEN_FILE}"
+}
+
+make_policy_token_owner_writable() {
+    chmod 0600 "${POLICY_TOKEN_FILE}"
+}
+
 cleanup() {
     local exit_code=$?
 
@@ -275,6 +288,7 @@ python3 "${REPO_ROOT}/scripts/provision-policy-reader.py" \
     --admin-url "http://127.0.0.1:${SMOKE_ADMIN_PORT}" \
     --admin-token-file "${ADMIN_TOKEN_FILE}" \
     --output-file "${POLICY_TOKEN_FILE}"
+make_policy_token_container_readable
 
 compose up --build --wait --wait-timeout 180
 
@@ -339,6 +353,7 @@ wait_for_admin_health
 cp "${POLICY_TOKEN_FILE}" "${POLICY_TOKEN_BACKUP_FILE}"
 failure_baseline="$(prometheus_scalar \
     'dns_policy_sync_results_total{result="failure"}')"
+make_policy_token_owner_writable
 python3 - "${POLICY_TOKEN_FILE}" <<'PY'
 from pathlib import Path
 import sys
@@ -347,6 +362,7 @@ path = Path(sys.argv[1])
 with path.open("wb") as destination:
     destination.write(b"invalid-policy-reader-token-000000000\n")
 PY
+make_policy_token_container_readable
 wait_for_metric_increase \
     'dns_policy_sync_results_total{result="failure"}' \
     "${failure_baseline}" \
@@ -355,6 +371,7 @@ policy_e2e assert-blocked
 
 success_baseline="$(prometheus_scalar \
     'sum(dns_policy_sync_results_total{result=~"activated|unchanged|not_modified"})')"
+make_policy_token_owner_writable
 python3 - "${POLICY_TOKEN_BACKUP_FILE}" "${POLICY_TOKEN_FILE}" <<'PY'
 from pathlib import Path
 import sys
@@ -364,6 +381,7 @@ destination = Path(sys.argv[2])
 with destination.open("wb") as output:
     output.write(source.read_bytes())
 PY
+make_policy_token_container_readable
 wait_for_metric_increase \
     'sum(dns_policy_sync_results_total{result=~"activated|unchanged|not_modified"})' \
     "${success_baseline}" \
