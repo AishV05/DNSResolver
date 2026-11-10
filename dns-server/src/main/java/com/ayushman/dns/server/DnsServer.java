@@ -33,7 +33,7 @@ public final class DnsServer implements AutoCloseable {
     ) {
         this(
                 config,
-                createResolver(config),
+                createRuntime(config),
                 new PolicySnapshotStore(PolicySyncMode.DISABLED),
                 PolicyTelemetry.forMode(PolicySyncMode.DISABLED)
         );
@@ -45,7 +45,7 @@ public final class DnsServer implements AutoCloseable {
     ) {
         this(
                 config,
-                createResolver(config),
+                createRuntime(config),
                 policySnapshotStore,
                 PolicyTelemetry.forMode(policySnapshotStore == null
                         ? null
@@ -60,9 +60,24 @@ public final class DnsServer implements AutoCloseable {
     ) {
         this(
                 config,
-                createResolver(config),
+                createRuntime(config),
                 policySnapshotStore,
                 policyTelemetry
+        );
+    }
+
+    private DnsServer(
+            ServerConfig config,
+            ConfiguredRuntime runtime,
+            PolicySnapshotStore policySnapshotStore,
+            PolicyTelemetry policyTelemetry
+    ) {
+        this(
+                config,
+                runtime == null ? null : runtime.resolver(),
+                policySnapshotStore,
+                policyTelemetry,
+                runtime == null ? null : runtime.metrics()
         );
     }
 
@@ -99,10 +114,27 @@ public final class DnsServer implements AutoCloseable {
             PolicySnapshotStore policySnapshotStore,
             PolicyTelemetry policyTelemetry
     ) {
+        this(
+                config,
+                resolver,
+                policySnapshotStore,
+                policyTelemetry,
+                new ServerMetrics()
+        );
+    }
+
+    private DnsServer(
+            ServerConfig config,
+            DnsResolver resolver,
+            PolicySnapshotStore policySnapshotStore,
+            PolicyTelemetry policyTelemetry,
+            ServerMetrics metrics
+    ) {
         if (config == null
                 || resolver == null
                 || policySnapshotStore == null
-                || policyTelemetry == null) {
+                || policyTelemetry == null
+                || metrics == null) {
             throw new IllegalArgumentException(
                     "DNS server dependencies must not be null"
             );
@@ -115,7 +147,7 @@ public final class DnsServer implements AutoCloseable {
 
         this.policySnapshotStore = policySnapshotStore;
         this.policyTelemetry = policyTelemetry;
-        metrics = new ServerMetrics();
+        this.metrics = metrics;
         DnsRequestProcessor processor = new DnsRequestProcessor(
                 resolver,
                 metrics,
@@ -286,23 +318,36 @@ public final class DnsServer implements AutoCloseable {
         }
     }
 
-    private static DnsResolver createResolver(
+    private static ConfiguredRuntime createRuntime(
             ServerConfig config
     ) {
         if (config == null) {
             throw new IllegalArgumentException("config must not be null");
         }
 
-        return new RecursiveResolver(
+        ServerMetrics metrics = new ServerMetrics();
+        DnsResolver resolver = new RecursiveResolver(
                 new UpstreamDnsClient(
                         config.upstreamTimeoutMillis(),
                         config.upstreamMaxAttempts(),
-                        config.upstreamPort()
-                )
+                        config.upstreamPort(),
+                        metrics
+                ),
+                com.ayushman.dns.resolver.RootServers.ROOT_SERVERS,
+                config.resolverCacheConfig(),
+                System::nanoTime,
+                metrics
         );
+        return new ConfiguredRuntime(resolver, metrics);
     }
 
     private boolean listenersRunning() {
         return udpServer.isRunning() && tcpServer.isRunning();
+    }
+
+    private record ConfiguredRuntime(
+            DnsResolver resolver,
+            ServerMetrics metrics
+    ) {
     }
 }

@@ -101,6 +101,7 @@ final class PrometheusMetricsFormatter {
         appendSuccessfulHandlingDuration(output, snapshot);
         appendTransportRequests(output, snapshot);
         appendTcpConnections(output, snapshot);
+        appendResolverOperationalMetrics(output, snapshot);
         appendPolicyMetrics(output, policy);
 
         return output.toString();
@@ -370,6 +371,95 @@ final class PrometheusMetricsFormatter {
         );
     }
 
+    private static void appendResolverOperationalMetrics(
+            StringBuilder output,
+            ServerMetrics.Snapshot snapshot
+    ) {
+        appendTransportCounter(
+                output,
+                "dns_parser_rejections_total",
+                "DNS packets rejected by the parser by client transport.",
+                snapshot.udpParserRejections(),
+                snapshot.tcpParserRejections()
+        );
+
+        output.append("# HELP dns_cache_lookups_total ")
+                .append("Resolver cache lookup outcomes.\n")
+                .append("# TYPE dns_cache_lookups_total counter\n");
+        appendTwoLabeledValue(
+                output,
+                "dns_cache_lookups_total",
+                "cache",
+                "positive",
+                "result",
+                "hit",
+                snapshot.positiveCacheHits()
+        );
+        appendTwoLabeledValue(
+                output,
+                "dns_cache_lookups_total",
+                "cache",
+                "positive",
+                "result",
+                "miss",
+                snapshot.positiveCacheMisses()
+        );
+        appendTwoLabeledValue(
+                output,
+                "dns_cache_lookups_total",
+                "cache",
+                "negative",
+                "result",
+                "hit",
+                snapshot.negativeCacheHits()
+        );
+        appendTwoLabeledValue(
+                output,
+                "dns_cache_lookups_total",
+                "cache",
+                "negative",
+                "result",
+                "miss",
+                snapshot.negativeCacheMisses()
+        );
+
+        output.append("# HELP dns_cache_evictions_total ")
+                .append("Capacity-driven resolver cache evictions.\n")
+                .append("# TYPE dns_cache_evictions_total counter\n");
+        appendLabeledValue(
+                output,
+                "dns_cache_evictions_total",
+                "cache",
+                "positive",
+                snapshot.positiveCacheEvictions()
+        );
+        appendLabeledValue(
+                output,
+                "dns_cache_evictions_total",
+                "cache",
+                "negative",
+                snapshot.negativeCacheEvictions()
+        );
+        appendCounter(
+                output,
+                "dns_upstream_response_rejections_total",
+                "Upstream responses rejected by wire or correlation checks.",
+                snapshot.upstreamResponseRejections()
+        );
+        appendCounter(
+                output,
+                "dns_nameserver_failovers_total",
+                "Resolver transitions to another eligible nameserver.",
+                snapshot.nameserverFailovers()
+        );
+        appendCounter(
+                output,
+                "dns_cname_loop_rejections_total",
+                "CNAME loops or hop-limit overruns rejected by the resolver.",
+                snapshot.cnameLoopRejections()
+        );
+    }
+
     private static void appendDrops(
             StringBuilder output,
             ServerMetrics.Snapshot snapshot
@@ -462,6 +552,29 @@ final class PrometheusMetricsFormatter {
                 .append(labelName)
                 .append("=\"")
                 .append(labelValue)
+                .append("\"} ")
+                .append(value)
+                .append('\n');
+    }
+
+    private static void appendTwoLabeledValue(
+            StringBuilder output,
+            String name,
+            String firstLabelName,
+            String firstLabelValue,
+            String secondLabelName,
+            String secondLabelValue,
+            long value
+    ) {
+        output.append(name)
+                .append('{')
+                .append(firstLabelName)
+                .append("=\"")
+                .append(firstLabelValue)
+                .append("\",")
+                .append(secondLabelName)
+                .append("=\"")
+                .append(secondLabelValue)
                 .append("\"} ")
                 .append(value)
                 .append('\n');

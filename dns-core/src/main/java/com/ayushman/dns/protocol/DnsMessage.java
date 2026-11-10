@@ -1,6 +1,7 @@
 package com.ayushman.dns.protocol;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 public class DnsMessage {
@@ -42,11 +43,19 @@ public class DnsMessage {
             List<DnsRecord> additionals,
             EdnsInfo edns
     ) {
-        this.header = header;
-        this.questions = questions;
-        this.answers = answers;
-        this.authorities = authorities;
-        this.additionals = additionals;
+        this.header = Objects.requireNonNull(header, "header");
+        this.questions = List.copyOf(
+                Objects.requireNonNull(questions, "questions")
+        );
+        this.answers = List.copyOf(
+                Objects.requireNonNull(answers, "answers")
+        );
+        this.authorities = List.copyOf(
+                Objects.requireNonNull(authorities, "authorities")
+        );
+        this.additionals = List.copyOf(
+                Objects.requireNonNull(additionals, "additionals")
+        );
         this.edns = edns;
     }
 

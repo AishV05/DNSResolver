@@ -5,7 +5,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.ayushman.dns.policy.DnsPolicyDecision;
 import com.ayushman.dns.policy.DnsPolicyEvaluator;
+import com.ayushman.dns.policy.DnsPolicyRefusedException;
 import com.ayushman.dns.policy.DnsPolicySnapshot;
+import com.ayushman.dns.policy.DnsPolicyUnavailableException;
+import com.ayushman.dns.policy.DnsResolutionPolicy;
 import com.ayushman.dns.protocol.DnsQuestion;
 
 /**
@@ -80,6 +83,35 @@ public final class PolicySnapshotStore {
                 == DnsPolicyDecision.BLOCK
                 ? EvaluationResult.BLOCK
                 : EvaluationResult.ALLOW;
+    }
+
+    /**
+     * Captures exactly one immutable evaluator for a complete DNS request.
+     * A newer snapshot may be activated concurrently, but it is deliberately
+     * observed only by the next request.
+     */
+    DnsResolutionPolicy capturePolicy()
+            throws DnsPolicyUnavailableException {
+        if (mode == PolicySyncMode.DISABLED) {
+            return DnsResolutionPolicy.ALLOW_ALL;
+        }
+
+        ActivePolicy active = current.get();
+        if (active == null) {
+            throw new DnsPolicyUnavailableException();
+        }
+
+        DnsPolicyEvaluator evaluator = active.evaluator();
+        return question -> {
+            if (question == null) {
+                throw new IllegalArgumentException(
+                        "DNS policy question must not be null"
+                );
+            }
+            if (evaluator.evaluate(question) == DnsPolicyDecision.BLOCK) {
+                throw new DnsPolicyRefusedException();
+            }
+        };
     }
 
     ActivationResult activate(DnsPolicySnapshot candidate) {

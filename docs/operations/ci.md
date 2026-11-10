@@ -18,6 +18,7 @@ and deployment use separate protected environments and credential controls.
 | Check | Outcome |
 | --- | --- |
 | Reproducible verification | Maven Wrapper pins the Maven distribution and `verify` runs the full Java test suite with a JaCoCo baseline report. |
+| DNS wire fuzz smoke | A standalone, ten-second Jazzer run mutates checked-in DNS packet seeds; deterministic JUnit fixtures retain every known regression. |
 | Configuration and image validation | Compose is validated without exposing local secrets; DNS server and Admin API images are built and vulnerability-scanned. |
 | Pull-request supply-chain review | Dependency changes are reviewed before merge, and CodeQL analyzes both Java and GitHub Actions workflow code. |
 | Trusted stack smoke | A full disposable Compose smoke test runs after `main` changes, on a schedule, or when manually dispatched. |
@@ -40,6 +41,7 @@ The scripts mirror the pipeline stages:
 
 ```bash
 ./scripts/verify.sh
+./scripts/fuzz-smoke.sh
 ./scripts/validate-compose.sh
 ./scripts/compose-smoke.sh
 ```
@@ -48,6 +50,10 @@ The scripts mirror the pipeline stages:
 the Maven `target/site/jacoco` report directories. The report is an initial
 coverage baseline, not a threshold or a merge-quality gate. Use it to identify
 where coverage is missing before adding a deliberate, reviewed threshold.
+`fuzz-smoke.sh` compiles the DNS wire target, builds an isolated test
+classpath, and runs standalone Jazzer for ten seconds. It requires a JDK with
+the attach mechanism available; CI uses Temurin 17. Any discovered input must
+be reduced into the deterministic adversarial corpus before the fix is closed.
 
 `validate-compose.sh` checks the local and private-staging Compose models,
 Prometheus configuration and rules, release schemas, SPDX normalization,
@@ -75,7 +81,7 @@ SMOKE_DNS_PORT=25354 SMOKE_ADMIN_PORT=28081 \
 
 | Workflow file | Runs when | Purpose |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | Pull requests, changes to `main`, and manual dispatch | Maven verify, Compose validation, and separate DNS/Admin image build-and-scan checks. |
+| `.github/workflows/ci.yml` | Pull requests, changes to `main`, and manual dispatch | Maven verify, DNS wire fuzz smoke, Compose validation, and separate DNS/Admin image build-and-scan checks. |
 | `.github/workflows/dependency-review.yml` | Pull requests targeting `main` | Blocks introduction of dependency vulnerabilities at the configured severity. |
 | `.github/workflows/codeql.yml` | Pull requests, `main`, a weekly schedule, and manual dispatch | CodeQL analysis for `java-kotlin` and `actions`. |
 | `.github/workflows/stack-smoke.yml` | `main`, scheduled, and manual dispatch | Full disposable Compose smoke; deliberately not a normal PR job. |
@@ -87,6 +93,7 @@ The expected required pull-request checks are exactly:
 
 ```text
 CI / Maven verify
+CI / DNS wire fuzz smoke
 CI / Validate configuration
 CI / Build and scan DNS server image
 CI / Build and scan Admin API image
@@ -177,7 +184,7 @@ in GitHub before making the checks merge requirements:
    private repository before expecting SARIF/code-scanning uploads.
 5. Enable secret scanning and push protection when the repository plan makes
    them available. They complement, rather than replace, the CI Trivy scan.
-6. Add a `main` branch ruleset that requires the seven checks listed above and
+6. Add a `main` branch ruleset that requires the eight checks listed above and
    prevents force pushes or direct unreviewed changes.
 7. Before the first release tag, enable **Release immutability** and create the
    separately protected `ghcr-publish`, `ghcr-attest`, and `github-release`

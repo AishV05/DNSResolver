@@ -2,10 +2,12 @@ package com.ayushman.dns.server;
 
 import java.util.concurrent.atomic.LongAdder;
 
+import com.ayushman.dns.resolver.ResolverObserver;
+
 /**
  * Thread-safe, fixed-cardinality counters for both DNS transports.
  */
-public final class ServerMetrics {
+public final class ServerMetrics implements ResolverObserver {
 
     private final LongAdder receivedRequests = new LongAdder();
     private final LongAdder admittedRequests = new LongAdder();
@@ -31,6 +33,17 @@ public final class ServerMetrics {
     private final LongAdder tcpConnectionQueueRejections = new LongAdder();
     private final LongAdder tcpConnectionTimeouts = new LongAdder();
     private final LongAdder tcpProtocolErrors = new LongAdder();
+    private final LongAdder udpParserRejections = new LongAdder();
+    private final LongAdder tcpParserRejections = new LongAdder();
+    private final LongAdder positiveCacheHits = new LongAdder();
+    private final LongAdder positiveCacheMisses = new LongAdder();
+    private final LongAdder negativeCacheHits = new LongAdder();
+    private final LongAdder negativeCacheMisses = new LongAdder();
+    private final LongAdder positiveCacheEvictions = new LongAdder();
+    private final LongAdder negativeCacheEvictions = new LongAdder();
+    private final LongAdder upstreamResponseRejections = new LongAdder();
+    private final LongAdder nameserverFailovers = new LongAdder();
+    private final LongAdder cnameLoopRejections = new LongAdder();
 
     void recordReceivedRequest() {
         recordReceivedRequest(DnsTransport.UDP);
@@ -82,6 +95,11 @@ public final class ServerMetrics {
             DnsTransport transport
     ) {
         malformedRequests.increment();
+        transportCounter(
+                transport,
+                udpParserRejections,
+                tcpParserRejections
+        ).increment();
     }
 
     void recordUnsupportedEdnsVersion() {
@@ -154,6 +172,43 @@ public final class ServerMetrics {
         tcpProtocolErrors.increment();
     }
 
+    @Override
+    public void cacheLookup(CacheKind cache, boolean hit) {
+        if (cache == null) {
+            throw new IllegalArgumentException("cache must not be null");
+        }
+        if (cache == CacheKind.POSITIVE) {
+            (hit ? positiveCacheHits : positiveCacheMisses).increment();
+        } else {
+            (hit ? negativeCacheHits : negativeCacheMisses).increment();
+        }
+    }
+
+    @Override
+    public void cacheEviction(CacheKind cache) {
+        if (cache == null) {
+            throw new IllegalArgumentException("cache must not be null");
+        }
+        (cache == CacheKind.POSITIVE
+                ? positiveCacheEvictions
+                : negativeCacheEvictions).increment();
+    }
+
+    @Override
+    public void upstreamResponseRejected() {
+        upstreamResponseRejections.increment();
+    }
+
+    @Override
+    public void nameserverFailover() {
+        nameserverFailovers.increment();
+    }
+
+    @Override
+    public void cnameLoopRejected() {
+        cnameLoopRejections.increment();
+    }
+
     public Snapshot snapshot() {
         long resolved = resolvedRequests.sum();
         long handledNanos = totalHandledNanos.sum();
@@ -187,7 +242,18 @@ public final class ServerMetrics {
                 tcpConnectionLimitRejections.sum(),
                 tcpConnectionQueueRejections.sum(),
                 tcpConnectionTimeouts.sum(),
-                tcpProtocolErrors.sum()
+                tcpProtocolErrors.sum(),
+                udpParserRejections.sum(),
+                tcpParserRejections.sum(),
+                positiveCacheHits.sum(),
+                positiveCacheMisses.sum(),
+                negativeCacheHits.sum(),
+                negativeCacheMisses.sum(),
+                positiveCacheEvictions.sum(),
+                negativeCacheEvictions.sum(),
+                upstreamResponseRejections.sum(),
+                nameserverFailovers.sum(),
+                cnameLoopRejections.sum()
         );
     }
 
@@ -230,7 +296,18 @@ public final class ServerMetrics {
             long tcpConnectionLimitRejections,
             long tcpConnectionQueueRejections,
             long tcpConnectionTimeouts,
-            long tcpProtocolErrors
+            long tcpProtocolErrors,
+            long udpParserRejections,
+            long tcpParserRejections,
+            long positiveCacheHits,
+            long positiveCacheMisses,
+            long negativeCacheHits,
+            long negativeCacheMisses,
+            long positiveCacheEvictions,
+            long negativeCacheEvictions,
+            long upstreamResponseRejections,
+            long nameserverFailovers,
+            long cnameLoopRejections
     ) {
     }
 }

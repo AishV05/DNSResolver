@@ -54,6 +54,10 @@ Desktop.ini
 logs/
 *.out
 
+# Local Jazzer coverage corpus and crash artifacts
+.cifuzz-corpus/
+crash-*
+
 #################################
 # Temporary
 #################################

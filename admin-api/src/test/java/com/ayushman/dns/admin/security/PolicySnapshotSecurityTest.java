@@ -72,10 +72,6 @@ class PolicySnapshotSecurityTest {
         List<SecuredRequest> adminRequests = List.of(
                 new SecuredRequest(HttpMethod.GET, "/api/v1/admin/auth/me"),
                 new SecuredRequest(HttpMethod.GET, "/api/v1/admin/status"),
-                new SecuredRequest(
-                        HttpMethod.GET,
-                        "/api/v1/admin/resolver/configuration"
-                ),
                 new SecuredRequest(HttpMethod.GET, "/api/v1/admin/policies"),
                 new SecuredRequest(HttpMethod.GET, "/api/v1/admin/policies/1"),
                 new SecuredRequest(HttpMethod.POST, "/api/v1/admin/policies"),

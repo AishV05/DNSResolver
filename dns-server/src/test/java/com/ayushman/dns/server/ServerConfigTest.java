@@ -39,7 +39,11 @@ public class ServerConfigTest {
                         Map.entry(
                                 "DNS_UPSTREAM_TIMEOUT_MILLIS",
                                 "1200"
-                        )
+                        ),
+                        Map.entry("DNS_CACHE_POSITIVE_MAX_ENTRIES", "64"),
+                        Map.entry("DNS_CACHE_NEGATIVE_MAX_ENTRIES", "32"),
+                        Map.entry("DNS_CACHE_POSITIVE_MAX_TTL_SECONDS", "600"),
+                        Map.entry("DNS_CACHE_NEGATIVE_MAX_TTL_SECONDS", "120")
                 )
         );
 
@@ -55,6 +59,10 @@ public class ServerConfigTest {
         assertEquals(9191, config.metricsPort());
         assertEquals("0.0.0.0", config.metricsBindAddress());
         assertEquals(1200, config.upstreamTimeoutMillis());
+        assertEquals(64, config.cachePositiveMaxEntries());
+        assertEquals(32, config.cacheNegativeMaxEntries());
+        assertEquals(600, config.cachePositiveMaxTtlSeconds());
+        assertEquals(120, config.cacheNegativeMaxTtlSeconds());
         assertEquals(200, config.workerQueueCapacity());
     }
 
@@ -93,7 +101,8 @@ public class ServerConfigTest {
                 () -> new ServerConfig(
                         0, 1, 1, 1, 1, 1,
                         2, 1, 1, 1, 1, 1, 1,
-                        1, 8080, 9091, "127.0.0.1", 1, 1, 53
+                        1, 8080, 9091, "127.0.0.1", 1, 1, 53,
+                        1, 1, 1, 1
                 )
         );
 
@@ -102,7 +111,8 @@ public class ServerConfigTest {
                 () -> new ServerConfig(
                         5354, 1, 1, 1, 1, 1,
                         2, 1, 1, 1, 1, 1, 1,
-                        1, 8080, 8080, "127.0.0.1", 1, 1, 53
+                        1, 8080, 8080, "127.0.0.1", 1, 1, 53,
+                        1, 1, 1, 1
                 )
         );
 
@@ -115,6 +125,13 @@ public class ServerConfigTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> ServerConfig.from(invalidConnections, Map.of())
+        );
+
+        Properties invalidCache = new Properties();
+        invalidCache.setProperty("dns.cache.positiveMaxEntries", "0");
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> ServerConfig.from(invalidCache, Map.of())
         );
 
         Properties excessiveConnections = new Properties();
@@ -135,6 +152,19 @@ public class ServerConfigTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> ServerConfig.from(excessiveTimeout, Map.of())
+        );
+
+        Properties excessiveUpstreamAttempts = new Properties();
+        excessiveUpstreamAttempts.setProperty(
+                "dns.upstreamMaxAttempts",
+                "6"
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> ServerConfig.from(
+                        excessiveUpstreamAttempts,
+                        Map.of()
+                )
         );
     }
 }

@@ -6,22 +6,28 @@ import com.ayushman.dns.protocol.DnsMessage;
 
 public final class ResolverResponseFactory {
 
+    private static final int QR = 0x8000;
+    private static final int OPCODE_MASK = 0x7800;
+    private static final int RD = 0x0100;
+    private static final int RA = 0x0080;
+    private static final int CD = 0x0010;
+    private static final int RCODE_MASK = 0x000F;
+
     private ResolverResponseFactory() {
     }
 
     public static DnsMessage create(
             DnsMessage clientQuery,
-            CachedDnsData cached,
-            long remainingTtl
+            CachedDnsData cached
     ) {
 
-        int flags = buildResponseFlags(clientQuery);
+        int flags = buildResponseFlags(clientQuery, 0);
 
         DnsHeader header =
                 new DnsHeader(
                         clientQuery.header().id(),
                         flags,
-                        cached.questions().size(),
+                        clientQuery.questions().size(),
                         cached.answers().size(),
                         cached.authorities().size(),
                         cached.additionals().size()
@@ -29,67 +35,76 @@ public final class ResolverResponseFactory {
 
         return new DnsMessage(
                 header,
-                cached.questions(),
-                DnsRecordCloner.cloneRecords(
+                clientQuery.questions(),
                 cached.answers(),
-                remainingTtl
+                cached.authorities(),
+                cached.additionals()
+        );
+    }
+
+    /**
+     * Compatibility overload for callers with legacy single-TTL cache data.
+     */
+    public static DnsMessage create(
+            DnsMessage clientQuery,
+            CachedDnsData cached,
+            long remainingTtl
+    ) {
+        CachedDnsData aged = new CachedDnsData(
+                cached.questions(),
+                DnsRecordCloner.cloneRecords(cached.answers(), remainingTtl),
+                DnsRecordCloner.cloneRecords(
+                        cached.authorities(),
+                        remainingTtl
                 ),
                 DnsRecordCloner.cloneRecords(
-                cached.authorities(),
-                remainingTtl
-        ),
-                DnsRecordCloner.cloneRecords(
-                cached.additionals(),
-                remainingTtl
-        )
+                        cached.additionals(),
+                        remainingTtl
+                )
         );
+        return create(clientQuery, aged);
     }
 
     /**
      * Builds response flags for a recursive resolver.
      */
     private static int buildResponseFlags(
-            DnsMessage clientQuery
+            DnsMessage clientQuery,
+            int responseCode
     ) {
-
         int requestFlags = clientQuery.header().flags();
 
-        // Preserve RD (Recursion Desired)
-        int rd = requestFlags & 0x0100;
-
-        // QR = Response
-        int qr = 0x8000;
-
-        // RA = Recursion Available
-        int ra = 0x0080;
-
-        return qr | rd | ra;
+        return QR
+                | RA
+                | (requestFlags & (OPCODE_MASK | RD | CD))
+                | (responseCode & RCODE_MASK);
     }
 
     public static DnsMessage fromUpstream(
-        DnsMessage clientQuery,
-        DnsMessage upstreamResponse
-) {
+            DnsMessage clientQuery,
+            DnsMessage upstreamResponse
+    ) {
+        DnsHeader upstreamHeader = upstreamResponse.header();
 
-    DnsHeader upstreamHeader =
-            upstreamResponse.header();
+        DnsHeader clientHeader =
+                new DnsHeader(
+                        clientQuery.header().id(),
+                        buildResponseFlags(
+                                clientQuery,
+                                upstreamHeader.flags()
+                        ),
+                        clientQuery.questions().size(),
+                        upstreamResponse.answers().size(),
+                        upstreamResponse.authorities().size(),
+                        upstreamResponse.additionals().size()
+                );
 
-    DnsHeader clientHeader =
-            new DnsHeader(
-                    clientQuery.header().id(),
-                    upstreamHeader.flags(),
-                    upstreamHeader.qdCount(),
-                    upstreamHeader.anCount(),
-                    upstreamHeader.nsCount(),
-                    upstreamHeader.arCount()
-            );
-
-    return new DnsMessage(
-            clientHeader,
-            upstreamResponse.questions(),
-            upstreamResponse.answers(),
-            upstreamResponse.authorities(),
-            upstreamResponse.additionals()
-    );
-}
+        return new DnsMessage(
+                clientHeader,
+                clientQuery.questions(),
+                upstreamResponse.answers(),
+                upstreamResponse.authorities(),
+                upstreamResponse.additionals()
+        );
+    }
 }

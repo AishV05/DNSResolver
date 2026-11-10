@@ -69,7 +69,9 @@ public class UdpDnsServer implements AutoCloseable {
                                 config.upstreamTimeoutMillis(),
                                 config.upstreamMaxAttempts(),
                                 config.upstreamPort()
-                        )
+                        ),
+                        com.ayushman.dns.resolver.RootServers.ROOT_SERVERS,
+                        config.resolverCacheConfig()
                 ),
                 new RequestAdmissionController(
                         config.maxRequestBytes(),

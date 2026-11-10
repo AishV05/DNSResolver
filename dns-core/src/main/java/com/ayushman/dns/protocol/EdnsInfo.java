@@ -55,6 +55,8 @@ public final class EdnsInfo {
             );
         }
 
+        validateOptionFraming(options);
+
         this.udpPayloadSize = udpPayloadSize;
         this.extendedRcode = extendedRcode;
         this.version = version;
@@ -153,6 +155,33 @@ public final class EdnsInfo {
             throw new IllegalArgumentException(
                     name + " must be an unsigned 16-bit value"
             );
+        }
+    }
+
+    private static void validateOptionFraming(
+            byte[] options
+    ) {
+        int offset = 0;
+
+        while (offset < options.length) {
+            if (options.length - offset < 4) {
+                throw new IllegalArgumentException(
+                        "EDNS option header is truncated"
+                );
+            }
+
+            int optionLength =
+                    ((options[offset + 2] & 0xFF) << 8)
+                            | (options[offset + 3] & 0xFF);
+            offset += 4;
+
+            if (optionLength > options.length - offset) {
+                throw new IllegalArgumentException(
+                        "EDNS option data is truncated"
+                );
+            }
+
+            offset += optionLength;
         }
     }
 }

@@ -17,7 +17,6 @@ import org.springframework.test.context.TestPropertySource;
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
-                "dns.admin.root-servers=192.0.2.10,192.0.2.11",
                 "spring.datasource.url=jdbc:h2:mem:admin_status_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE"
         }
 )
@@ -49,7 +48,6 @@ class AdminApiApplicationTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().service()).isEqualTo("dns-admin-api");
         assertThat(response.getBody().status()).isEqualTo("UP");
-        assertThat(response.getBody().configuredRootServers()).isEqualTo(2);
         assertThat(response.getBody().persistedPolicyRules()).isZero();
         assertThat(response.getBody().enabledPolicyRules()).isZero();
         assertThat(response.getBody().publishedPolicyRevision()).isZero();
@@ -60,24 +58,12 @@ class AdminApiApplicationTest {
     }
 
     @Test
-    void exposesResolverTopologyAndActuatorHealth() {
-        ResponseEntity<AdminStatusController.ResolverConfigurationResponse>
-                configuration = restTemplate.exchange(
-                        url("/api/v1/admin/resolver/configuration"),
-                        HttpMethod.GET,
-                        AdminApiTestAuthentication.authenticated(),
-                        AdminStatusController.ResolverConfigurationResponse.class
-                );
+    void exposesActuatorHealth() {
         ResponseEntity<HealthResponse> health = restTemplate.getForEntity(
                 url("/actuator/health"),
                 HealthResponse.class
         );
 
-        assertThat(configuration.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(configuration.getBody()).isNotNull();
-        assertThat(configuration.getBody().mode()).isEqualTo("recursive");
-        assertThat(configuration.getBody().rootServers())
-                .containsExactly("192.0.2.10", "192.0.2.11");
         assertThat(health.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(health.getBody()).isNotNull();
         assertThat(health.getBody().status()).isEqualTo("UP");

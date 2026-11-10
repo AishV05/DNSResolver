@@ -4,6 +4,8 @@ import com.ayushman.dns.protocol.DnsRecord;
 
 public final class SoaRecordUtil {
 
+    private static final long RFC_2181_MAX_TTL = 0x7FFF_FFFFL;
+
     private SoaRecordUtil() {
     }
 
@@ -41,6 +43,11 @@ public final class SoaRecordUtil {
 
         long soaTtl =
                 soaRecord.ttl();
+
+        if (soaTtl < 0 || soaTtl > RFC_2181_MAX_TTL
+                || minimum > RFC_2181_MAX_TTL) {
+            return 0;
+        }
 
         return Math.min(
                 soaTtl,

@@ -23,6 +23,8 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.0</junit.version>
+        <jazzer.version>0.30.0</jazzer.version>
+        <dnsjava.version>3.6.5</dnsjava.version>
         <jacoco.version>0.8.15</jacoco.version>
         <spring-boot.version>4.1.1</spring-boot.version>
         <tomcat.version>11.0.27</tomcat.version>

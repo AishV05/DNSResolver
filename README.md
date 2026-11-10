@@ -19,6 +19,37 @@ Admin API snapshot endpoint in a background thread and evaluates the active
 immutable snapshot before recursive resolution. Administrative HTTP and
 database traffic remain outside the DNS query path.
 
+## DNS security boundary
+
+Client and upstream DNS packets are untrusted even in the private deployment.
+The [DNS data-plane threat model](docs/security/dns-threat-model.md) defines the
+supported protocol profile, exact `FORMERR`/`SERVFAIL` failure contract, cache
+provenance, and the deterministic adversarial acceptance plan. Week 18A adds
+that contract and its test fixtures. Week 18B adds bounded primitive and name
+decoding, explicit format failures, immutable parsed data, strict EDNS framing,
+and offset-independent RDATA for the supported name-bearing record types. Week
+18C adds full-range `SecureRandom` upstream transaction IDs, connected UDP
+source filtering, exact UDP/TCP response correlation, absolute exchange
+deadlines plus a fixed rejection budget, validated UDP-to-TCP fallback,
+iterative `RD=0` queries, and client response-flag
+sanitization. Week 18D accepts only standard `IN` questions for recursion,
+returns `NOTIMP` for other QCLASS values and `AXFR`/`IXFR`, validates
+bailiwick-aware referrals, fails over across eligible nameservers, resolves
+out-of-bailiwick nameserver addresses from the roots, and returns only complete
+bounded CNAME chains with relevant authoritative answers. Week 18E adds
+label-aware bounded LRU caches, per-RRset TTL normalization and aging,
+SOA-derived negative lifetimes, failed-transaction isolation, and request-wide
+policy checks for every client-visible CNAME target. The final Week 18F gate
+adds repeatable Jazzer and deterministic corpus tests, dnsjava interoperability
+checks, privacy-safe resolver/cache telemetry, dashboards, and tested alerts.
+The resolver does not implement DNSSEC validation. See
+[ADR 0020](docs/adr/0020-dns-wire-trust-boundary.md),
+[ADR 0021](docs/adr/0021-bounded-dns-wire-decoding.md),
+[ADR 0022](docs/adr/0022-correlated-upstream-dns-exchanges.md),
+[ADR 0023](docs/adr/0023-bailiwick-referrals-and-bounded-aliases.md), and
+[ADR 0024](docs/adr/0024-bounded-cache-and-alias-policy-integrity.md), and
+[ADR 0025](docs/adr/0025-adversarial-proof-and-privacy-safe-observability.md).
+
 ## Run locally
 
 Use JDK 17 or newer. The checked-in Maven Wrapper supplies the project Maven
@@ -33,9 +64,14 @@ java -version
 
 ```bash
 ./mvnw -B -ntp verify
+./scripts/fuzz-smoke.sh
 java -jar dns-server/target/dns-server-0.1.0-SNAPSHOT.jar
 dig @127.0.0.1 -p 5354 example.com A
 ```
+
+The fuzz smoke uses standalone Jazzer for ten seconds. Maven verification also
+runs the deterministic adversarial corpus, while `integration-tests` checks
+wire interoperability against dnsjava without depending on public DNS.
 
 ## Admin API
 
@@ -72,8 +108,6 @@ curl http://127.0.0.1:8081/actuator/health
 curl -H "Authorization: Bearer $DNS_ADMIN_TOKEN" \
   http://127.0.0.1:8081/api/v1/admin/status
 curl -H "Authorization: Bearer $DNS_ADMIN_TOKEN" \
-  http://127.0.0.1:8081/api/v1/admin/resolver/configuration
-curl -H "Authorization: Bearer $DNS_ADMIN_TOKEN" \
   http://127.0.0.1:8081/api/v1/admin/auth/me
 ```
 
@@ -84,7 +118,7 @@ unlisted routes, including unlisted actuator routes, are denied.
 
 | Role | Access |
 | --- | --- |
-| `VIEWER` | Read status, resolver configuration, and policy records |
+| `VIEWER` | Read management status and policy records |
 | `POLICY_EDITOR` | `VIEWER` access plus policy create, update, and delete |
 | `POLICY_SNAPSHOT_READER` | Read only the internal versioned policy snapshot |
 | `ADMIN` | All `POLICY_EDITOR` access plus administrator and token management |
@@ -192,7 +226,15 @@ parsing and EDNS-version handling, a standard single-question query is checked
 before any resolver, cache, recursion, or upstream operation. A matching
 `BLOCK` rule returns DNS `REFUSED` (`RCODE=5`) over both UDP and TCP, echoes the
 question, preserves recursion intent, and includes a sanitized negotiated OPT
-record when the client used EDNS. Rules apply to every query type and class.
+record when the client used EDNS. The data plane recursively processes only
+class `IN`; other QCLASS values and the `AXFR`/`IXFR` types return `NOTIMP`
+before policy, cache, or recursion. One immutable policy evaluator is captured
+for the whole request. It checks the original supported client QNAME and every
+accepted client-visible CNAME target before the target is queried, returned, or
+cached. A cached CNAME chain is rechecked on every hit, so a new block takes
+effect without flushing valid DNS data. Nameserver-address lookups remain
+explicitly exempt because they are resolver infrastructure rather than client
+answer aliases.
 Zero-question, multi-question, response-shaped, and unsupported-opcode messages
 are rejected before policy or recursion, preventing ambiguous-query bypasses.
 
@@ -270,8 +312,12 @@ variables. A system property takes precedence when both are present.
 | `dns.metricsPort` | `DNS_METRICS_PORT` | `9091` | Prometheus metrics HTTP endpoint port |
 | `dns.metricsBindAddress` | `DNS_METRICS_BIND_ADDRESS` | `127.0.0.1` | Metrics endpoint bind address |
 | `dns.upstreamTimeoutMillis` | `DNS_UPSTREAM_TIMEOUT_MILLIS` | `2000` | Upstream request timeout |
-| `dns.upstreamMaxAttempts` | `DNS_UPSTREAM_MAX_ATTEMPTS` | `2` | Upstream retry attempts |
+| `dns.upstreamMaxAttempts` | `DNS_UPSTREAM_MAX_ATTEMPTS` | `2` | Upstream retry attempts (1-5) |
 | `dns.upstreamPort` | `DNS_UPSTREAM_PORT` | `53` | Upstream DNS port |
+| `dns.cache.positiveMaxEntries` | `DNS_CACHE_POSITIVE_MAX_ENTRIES` | `1024` | Maximum positive query outcomes retained per resolver |
+| `dns.cache.negativeMaxEntries` | `DNS_CACHE_NEGATIVE_MAX_ENTRIES` | `1024` | Maximum RFC 2308 negative outcomes retained per resolver |
+| `dns.cache.positiveMaxTtlSeconds` | `DNS_CACHE_POSITIVE_MAX_TTL_SECONDS` | `86400` | Upper bound applied to each positive RRset TTL |
+| `dns.cache.negativeMaxTtlSeconds` | `DNS_CACHE_NEGATIVE_MAX_TTL_SECONDS` | `10800` | Upper bound applied to SOA-derived negative TTLs |
 
 Policy synchronization settings are separate so a standalone server keeps its
 existing behavior unless the operator explicitly chooses `REQUIRED`:
@@ -305,7 +351,7 @@ DNS_PORT=5355 DNS_REQUESTS_PER_SECOND=50 \
 
 The server emits periodic counters for received, rate-limited, oversized, and
 queue-dropped traffic, along with malformed requests, resolver failures, and
-average successful-query handling time.
+average successful-query handling time. It never logs QNAMEs by default.
 
 ## DNS Prometheus metrics
 
@@ -320,7 +366,9 @@ The endpoint exports fixed-cardinality counters for received, admitted,
 dropped, malformed, unsupported-EDNS, resolved, and failed DNS requests. It
 also exposes per-transport listener and request signals, bounded TCP connection
 signals, a successful-query handling-time sum and count, policy snapshot state,
-sync results/freshness, and policy decisions by transport. Snapshot publication
+sync results/freshness, policy decisions by transport, parser rejections,
+positive/negative cache outcomes and evictions, rejected upstream responses,
+nameserver failover, and rejected CNAME loops. Snapshot publication
 age is informational; `dns_policy_sync_last_success_age_seconds` and
 `dns_policy_sync_stale` describe control-plane freshness because a valid `304`
 also refreshes them. It deliberately does **not** expose DNS names, client IP

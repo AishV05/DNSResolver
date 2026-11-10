@@ -3,6 +3,9 @@ package com.ayushman.dns.server;
 import java.util.Map;
 import java.util.Properties;
 
+import com.ayushman.dns.cache.ResolverCacheConfig;
+import com.ayushman.dns.resolver.UpstreamDnsClient;
+
 /**
  * Runtime settings for the dual-transport server and its upstream DNS client.
  *
@@ -29,7 +32,11 @@ public record ServerConfig(
         String metricsBindAddress,
         int upstreamTimeoutMillis,
         int upstreamMaxAttempts,
-        int upstreamPort
+        int upstreamPort,
+        int cachePositiveMaxEntries,
+        int cacheNegativeMaxEntries,
+        long cachePositiveMaxTtlSeconds,
+        long cacheNegativeMaxTtlSeconds
 ) {
 
     private static final int DEFAULT_PORT = 5_354;
@@ -53,6 +60,14 @@ public record ServerConfig(
     private static final int DEFAULT_UPSTREAM_TIMEOUT_MILLIS = 2_000;
     private static final int DEFAULT_UPSTREAM_MAX_ATTEMPTS = 2;
     private static final int DEFAULT_UPSTREAM_PORT = 53;
+    private static final int DEFAULT_CACHE_POSITIVE_MAX_ENTRIES =
+            ResolverCacheConfig.DEFAULT_POSITIVE_MAX_ENTRIES;
+    private static final int DEFAULT_CACHE_NEGATIVE_MAX_ENTRIES =
+            ResolverCacheConfig.DEFAULT_NEGATIVE_MAX_ENTRIES;
+    private static final long DEFAULT_CACHE_POSITIVE_MAX_TTL_SECONDS =
+            ResolverCacheConfig.DEFAULT_POSITIVE_MAX_TTL_SECONDS;
+    private static final long DEFAULT_CACHE_NEGATIVE_MAX_TTL_SECONDS =
+            ResolverCacheConfig.DEFAULT_NEGATIVE_MAX_TTL_SECONDS;
 
     public ServerConfig {
         validatePort(port, "port");
@@ -121,8 +136,19 @@ public record ServerConfig(
         }
 
         validatePositive(upstreamTimeoutMillis, "upstreamTimeoutMillis");
-        validatePositive(upstreamMaxAttempts, "upstreamMaxAttempts");
+        validateRange(
+                upstreamMaxAttempts,
+                1,
+                UpstreamDnsClient.MAX_ATTEMPTS,
+                "upstreamMaxAttempts"
+        );
         validatePort(upstreamPort, "upstreamPort");
+        new ResolverCacheConfig(
+                cachePositiveMaxEntries,
+                cacheNegativeMaxEntries,
+                cachePositiveMaxTtlSeconds,
+                cacheNegativeMaxTtlSeconds
+        );
     }
 
     public static ServerConfig fromSystem() {
@@ -153,7 +179,11 @@ public record ServerConfig(
                 DEFAULT_METRICS_BIND_ADDRESS,
                 DEFAULT_UPSTREAM_TIMEOUT_MILLIS,
                 DEFAULT_UPSTREAM_MAX_ATTEMPTS,
-                DEFAULT_UPSTREAM_PORT
+                DEFAULT_UPSTREAM_PORT,
+                DEFAULT_CACHE_POSITIVE_MAX_ENTRIES,
+                DEFAULT_CACHE_NEGATIVE_MAX_ENTRIES,
+                DEFAULT_CACHE_POSITIVE_MAX_TTL_SECONDS,
+                DEFAULT_CACHE_NEGATIVE_MAX_TTL_SECONDS
         );
     }
 
@@ -241,7 +271,23 @@ public record ServerConfig(
                         DEFAULT_UPSTREAM_MAX_ATTEMPTS),
                 readInt(properties, environment,
                         "dns.upstreamPort", "DNS_UPSTREAM_PORT",
-                        DEFAULT_UPSTREAM_PORT)
+                        DEFAULT_UPSTREAM_PORT),
+                readInt(properties, environment,
+                        "dns.cache.positiveMaxEntries",
+                        "DNS_CACHE_POSITIVE_MAX_ENTRIES",
+                        DEFAULT_CACHE_POSITIVE_MAX_ENTRIES),
+                readInt(properties, environment,
+                        "dns.cache.negativeMaxEntries",
+                        "DNS_CACHE_NEGATIVE_MAX_ENTRIES",
+                        DEFAULT_CACHE_NEGATIVE_MAX_ENTRIES),
+                readLong(properties, environment,
+                        "dns.cache.positiveMaxTtlSeconds",
+                        "DNS_CACHE_POSITIVE_MAX_TTL_SECONDS",
+                        DEFAULT_CACHE_POSITIVE_MAX_TTL_SECONDS),
+                readLong(properties, environment,
+                        "dns.cache.negativeMaxTtlSeconds",
+                        "DNS_CACHE_NEGATIVE_MAX_TTL_SECONDS",
+                        DEFAULT_CACHE_NEGATIVE_MAX_TTL_SECONDS)
         );
     }
 
@@ -269,7 +315,20 @@ public record ServerConfig(
                 metricsBindAddress,
                 upstreamTimeoutMillis,
                 upstreamMaxAttempts,
-                upstreamPort
+                upstreamPort,
+                cachePositiveMaxEntries,
+                cacheNegativeMaxEntries,
+                cachePositiveMaxTtlSeconds,
+                cacheNegativeMaxTtlSeconds
+        );
+    }
+
+    ResolverCacheConfig resolverCacheConfig() {
+        return new ResolverCacheConfig(
+                cachePositiveMaxEntries,
+                cacheNegativeMaxEntries,
+                cachePositiveMaxTtlSeconds,
+                cacheNegativeMaxTtlSeconds
         );
     }
 
@@ -293,6 +352,30 @@ public record ServerConfig(
 
         try {
             return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    propertyName + " must be an integer",
+                    e
+            );
+        }
+    }
+
+    private static long readLong(
+            Properties properties,
+            Map<String, String> environment,
+            String propertyName,
+            String environmentName,
+            long defaultValue
+    ) {
+        String value = properties.getProperty(propertyName);
+        if (value == null || value.isBlank()) {
+            value = environment.get(environmentName);
+        }
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(
                     propertyName + " must be an integer",

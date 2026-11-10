@@ -21,19 +21,8 @@ public class SimpleResolver implements DnsResolver {
         CachedDnsData cached = cache.get(question);
 
         if (cached != null) {
-
-            System.out.println("CACHE HIT: " + question.name());
-
-            long ttl = cache.remainingTtl(question);
-
-        return ResolverResponseFactory.create(
-                query,
-                cached,
-                ttl
-        );
+            return ResolverResponseFactory.create(query, cached);
         }
-
-        System.out.println("CACHE MISS: " + question.name());
 
         DnsHeader requestHeader = query.header();
 

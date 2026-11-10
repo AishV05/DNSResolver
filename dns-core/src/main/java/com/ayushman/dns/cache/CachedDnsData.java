@@ -1,6 +1,7 @@
 package com.ayushman.dns.cache;
 
 import java.util.List;
+import java.util.Objects;
 
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
@@ -21,4 +22,11 @@ public record CachedDnsData(
 
         List<DnsRecord> additionals
 
-) {}
+) {
+    public CachedDnsData {
+        questions = List.copyOf(Objects.requireNonNull(questions, "questions"));
+        answers = List.copyOf(Objects.requireNonNull(answers, "answers"));
+        authorities = List.copyOf(Objects.requireNonNull(authorities, "authorities"));
+        additionals = List.copyOf(Objects.requireNonNull(additionals, "additionals"));
+    }
+}

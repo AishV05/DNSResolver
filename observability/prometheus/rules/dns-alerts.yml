@@ -97,3 +97,28 @@ groups:
             At least three policy synchronization attempts failed in the
             trailing five-minute window for five minutes. The active
             last-known-good snapshot, if present, remains in use.
+
+      - alert: DnsUpstreamResponsesRejectedHigh
+        expr: increase(dns_upstream_response_rejections_total[5m]) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS upstream response rejections are elevated
+          description: >-
+            At least five malformed or uncorrelated upstream responses were
+            rejected in the trailing five-minute window for five minutes.
+            Check upstream reachability and response-correlation telemetry;
+            rejected packets are not followed or cached.
+
+      - alert: DnsCacheEvictionsHigh
+        expr: sum(increase(dns_cache_evictions_total[15m])) >= 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS cache eviction pressure is sustained
+          description: >-
+            At least one hundred bounded-cache evictions occurred in the
+            trailing fifteen-minute window for ten minutes. Inspect positive
+            and negative cache pressure before increasing configured limits.

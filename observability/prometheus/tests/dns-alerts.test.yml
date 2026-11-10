@@ -62,3 +62,44 @@ tests:
                 At least three policy synchronization attempts failed in the
                 trailing five-minute window for five minutes. The active
                 last-known-good snapshot, if present, remains in use.
+
+  - name: repeated upstream rejection becomes warning
+    interval: 1m
+    input_series:
+      - series: dns_upstream_response_rejections_total
+        values: 0+2x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DnsUpstreamResponsesRejectedHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: DNS upstream response rejections are elevated
+              description: >-
+                At least five malformed or uncorrelated upstream responses
+                were rejected in the trailing five-minute window for five
+                minutes. Check upstream reachability and
+                response-correlation telemetry; rejected packets are not
+                followed or cached.
+
+  - name: sustained bounded cache pressure becomes warning
+    interval: 1m
+    input_series:
+      - series: 'dns_cache_evictions_total{cache="positive"}'
+        values: 0+25x35
+      - series: 'dns_cache_evictions_total{cache="negative"}'
+        values: 0+5x35
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: DnsCacheEvictionsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: DNS cache eviction pressure is sustained
+              description: >-
+                At least one hundred bounded-cache evictions occurred in the
+                trailing fifteen-minute window for ten minutes. Inspect
+                positive and negative cache pressure before increasing
+                configured limits.

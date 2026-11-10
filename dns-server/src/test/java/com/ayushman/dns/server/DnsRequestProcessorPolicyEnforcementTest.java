@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -13,9 +14,11 @@ import com.ayushman.dns.policy.DnsPolicyRule;
 import com.ayushman.dns.policy.DnsPolicySnapshot;
 import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
+import com.ayushman.dns.protocol.DnsNameCodec;
 import com.ayushman.dns.protocol.DnsPacketParser;
 import com.ayushman.dns.protocol.DnsPacketWriter;
 import com.ayushman.dns.protocol.DnsQuestion;
+import com.ayushman.dns.protocol.DnsRecord;
 import com.ayushman.dns.protocol.EdnsInfo;
 import com.ayushman.dns.resolver.DnsResolver;
 import org.junit.jupiter.api.Test;
@@ -23,6 +26,7 @@ import org.junit.jupiter.api.Test;
 class DnsRequestProcessorPolicyEnforcementTest {
 
     private static final int RCODE_FORMERR = 1;
+    private static final int RCODE_NOTIMP = 4;
     private static final int RCODE_REFUSED = 5;
 
     @Test
@@ -32,7 +36,7 @@ class DnsRequestProcessorPolicyEnforcementTest {
                 "example.com",
                 DnsPolicyMatchType.EXACT
         ));
-        DnsQuestion question = new DnsQuestion("EXAMPLE.COM.", 28, 3);
+        DnsQuestion question = new DnsQuestion("EXAMPLE.COM.", 28, 1);
         DnsMessage request = query(
                 0x17D0,
                 0x0110,
@@ -42,7 +46,7 @@ class DnsRequestProcessorPolicyEnforcementTest {
                         0,
                         EdnsInfo.VERSION_ZERO,
                         EdnsInfo.DNSSEC_OK_FLAG,
-                        new byte[] {0, 1}
+                        new byte[] {0, 1, 0, 0}
                 )
         );
 
@@ -60,7 +64,7 @@ class DnsRequestProcessorPolicyEnforcementTest {
             assertTrue((response.header().flags() & 0x0080) != 0);
             assertTrue((response.header().flags() & 0x0010) != 0);
             assertEquals(
-                    List.of(new DnsQuestion("EXAMPLE.COM", 28, 3)),
+                    List.of(new DnsQuestion("EXAMPLE.COM", 28, 1)),
                     response.questions()
             );
             assertEquals(List.of(), response.answers());
@@ -87,7 +91,7 @@ class DnsRequestProcessorPolicyEnforcementTest {
     }
 
     @Test
-    void appliesDomainRulesAcrossQueryTypesAndClassesAtLabelBoundaries()
+    void appliesDomainRulesAcrossQueryTypesAtLabelBoundaries()
             throws Exception {
         TestContext context = requiredContext(rule(
                 "example.com",
@@ -98,7 +102,7 @@ class DnsRequestProcessorPolicyEnforcementTest {
                 RCODE_REFUSED,
                 rcode(exchange(
                         context.processor(),
-                        query("a.b.example.com", 255, 255),
+                        query("a.b.example.com", 255, 1),
                         DnsTransport.UDP
                 ))
         );
@@ -114,12 +118,46 @@ class DnsRequestProcessorPolicyEnforcementTest {
                 0,
                 rcode(exchange(
                         context.processor(),
-                        query("example.com.test", 15, 3),
+                        query("example.com.test", 15, 1),
                         DnsTransport.UDP
                 ))
         );
 
         assertEquals(2, context.resolverCalls().get());
+    }
+
+    @Test
+    void rejectsUnsupportedClassesAndZoneTransfersBeforePolicyOrResolution()
+            throws Exception {
+        TestContext context = requiredContext(rule(
+                "blocked.example",
+                DnsPolicyMatchType.EXACT
+        ));
+
+        List<DnsMessage> unsupported = List.of(
+                query("blocked.example", 1, 3),
+                query("blocked.example", 251, 1),
+                query("blocked.example", 252, 1)
+        );
+
+        for (DnsMessage request : unsupported) {
+            assertEquals(
+                    RCODE_NOTIMP,
+                    rcode(exchange(
+                            context.processor(),
+                            request,
+                            DnsTransport.UDP
+                    ))
+            );
+        }
+
+        assertEquals(0, context.resolverCalls().get());
+        PolicyTelemetry.Snapshot policyMetrics =
+                context.telemetry().snapshot(
+                        context.store().snapshotStatus()
+                );
+        assertEquals(0, policyMetrics.udpBlockedRequests());
+        assertEquals(0, policyMetrics.udpUnavailableRequests());
     }
 
     @Test
@@ -272,6 +310,58 @@ class DnsRequestProcessorPolicyEnforcementTest {
         assertEquals(0, context.resolverCalls().get());
     }
 
+    @Test
+    void mapsAResolverReturnedBlockedAliasToRefusedWithoutFailureMetrics()
+            throws Exception {
+        PolicySnapshotStore store = new PolicySnapshotStore(
+                PolicySyncMode.REQUIRED
+        );
+        store.activate(snapshot(1, rule(
+                "blocked.example",
+                DnsPolicyMatchType.EXACT
+        )));
+        PolicyTelemetry telemetry = PolicyTelemetry.forMode(
+                PolicySyncMode.REQUIRED
+        );
+        ServerMetrics metrics = new ServerMetrics();
+        DnsResolver resolver = query -> {
+            DnsQuestion original = query.questions().get(0);
+            return new DnsMessage(
+                    new DnsHeader(query.header().id(), 0x8180, 1, 1, 0, 0),
+                    query.questions(),
+                    List.of(new DnsRecord(
+                            original.name(),
+                            5,
+                            original.qclass(),
+                            60,
+                            encodedName("blocked.example")
+                    )),
+                    List.of(),
+                    List.of()
+            );
+        };
+        DnsRequestProcessor processor = new DnsRequestProcessor(
+                resolver,
+                metrics,
+                store,
+                telemetry
+        );
+
+        DnsMessage response = exchange(
+                processor,
+                query("allowed.example", 1, 1),
+                DnsTransport.TCP
+        );
+
+        assertEquals(RCODE_REFUSED, rcode(response));
+        assertEquals(0, metrics.snapshot().resolverFailures());
+        assertEquals(
+                1,
+                telemetry.snapshot(store.snapshotStatus())
+                        .tcpBlockedRequests()
+        );
+    }
+
     private TestContext requiredContext(DnsPolicyRule... rules) {
         AtomicInteger resolverCalls = new AtomicInteger();
         PolicySnapshotStore store = new PolicySnapshotStore(
@@ -352,6 +442,15 @@ class DnsRequestProcessorPolicyEnforcementTest {
                 List.of(new DnsQuestion(domain, type, questionClass)),
                 null
         );
+    }
+
+    private byte[] encodedName(String name) {
+        ByteBuffer buffer = ByteBuffer.allocate(255);
+        DnsNameCodec.encode(name, buffer);
+        byte[] encoded = new byte[buffer.position()];
+        buffer.flip();
+        buffer.get(encoded);
+        return encoded;
     }
 
     private DnsMessage query(

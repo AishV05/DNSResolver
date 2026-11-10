@@ -2,6 +2,9 @@ package com.ayushman.dns.server;
 
 import java.util.List;
 
+import com.ayushman.dns.policy.DnsPolicyRefusedException;
+import com.ayushman.dns.policy.DnsPolicyUnavailableException;
+import com.ayushman.dns.policy.DnsResolutionPolicy;
 import com.ayushman.dns.protocol.DnsHeader;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsPacketParser;
@@ -25,6 +28,9 @@ final class DnsRequestProcessor {
     private static final int RECURSION_DESIRED_FLAG = 0x0100;
     private static final int RECURSION_AVAILABLE_FLAG = 0x0080;
     private static final int CHECKING_DISABLED_FLAG = 0x0010;
+    private static final int CLASS_IN = 1;
+    private static final int TYPE_IXFR = 251;
+    private static final int TYPE_AXFR = 252;
 
     private final DnsResolver resolver;
     private final ServerMetrics metrics;
@@ -133,31 +139,32 @@ final class DnsRequestProcessor {
             );
         }
 
-        switch (policyDecision(query)) {
-            case UNAVAILABLE -> {
-                policyTelemetry.recordUnavailable(transport);
-                return prepareResponse(
-                        servFail(query),
-                        responsePayloadSize(query),
-                        transport
-                );
-            }
-            case BLOCK -> {
-                policyTelemetry.recordBlocked(transport);
-                return prepareResponse(
-                        refused(query),
-                        responsePayloadSize(query),
-                        transport
-                );
-            }
-            case ALLOW -> {
-                // Continue to recursive resolution below.
-            }
+        DnsQuestion question = query.questions().get(0);
+        if (question.qclass() != CLASS_IN
+                || question.type() == TYPE_IXFR
+                || question.type() == TYPE_AXFR) {
+            return prepareResponse(
+                    notImplemented(query),
+                    responsePayloadSize(query),
+                    transport
+            );
+        }
+
+        DnsResolutionPolicy policy;
+        try {
+            policy = policyStore.capturePolicy();
+        } catch (DnsPolicyUnavailableException unavailable) {
+            policyTelemetry.recordUnavailable(transport);
+            return prepareResponse(
+                    servFail(query),
+                    responsePayloadSize(query),
+                    transport
+            );
         }
 
         try {
             DnsMessage response = withEdnsForClient(
-                    resolver.resolve(query),
+                    resolver.resolve(query, policy),
                     query
             );
             byte[] encoded = prepareResponse(
@@ -170,6 +177,20 @@ final class DnsRequestProcessor {
                     System.nanoTime() - startTime
             );
             return encoded;
+        } catch (DnsPolicyRefusedException refused) {
+            policyTelemetry.recordBlocked(transport);
+            return prepareResponse(
+                    refused(query),
+                    responsePayloadSize(query),
+                    transport
+            );
+        } catch (DnsPolicyUnavailableException unavailable) {
+            policyTelemetry.recordUnavailable(transport);
+            return prepareResponse(
+                    servFail(query),
+                    responsePayloadSize(query),
+                    transport
+            );
         } catch (Exception resolverFailure) {
             metrics.recordResolverFailure(transport);
             return prepareResponse(
@@ -177,16 +198,6 @@ final class DnsRequestProcessor {
                     responsePayloadSize(query),
                     transport
             );
-        }
-    }
-
-    private PolicySnapshotStore.EvaluationResult policyDecision(
-            DnsMessage query
-    ) {
-        try {
-            return policyStore.evaluate(query.questions().get(0));
-        } catch (RuntimeException unavailable) {
-            return PolicySnapshotStore.EvaluationResult.UNAVAILABLE;
         }
     }
 

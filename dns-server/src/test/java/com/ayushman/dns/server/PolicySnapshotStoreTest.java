@@ -1,6 +1,7 @@
 package com.ayushman.dns.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,9 +10,12 @@ import java.time.Instant;
 import java.util.List;
 
 import com.ayushman.dns.policy.DnsPolicyAction;
+import com.ayushman.dns.policy.DnsPolicyRefusedException;
 import com.ayushman.dns.policy.DnsPolicyMatchType;
 import com.ayushman.dns.policy.DnsPolicyRule;
 import com.ayushman.dns.policy.DnsPolicySnapshot;
+import com.ayushman.dns.policy.DnsPolicyUnavailableException;
+import com.ayushman.dns.policy.DnsResolutionPolicy;
 import com.ayushman.dns.protocol.DnsQuestion;
 import org.junit.jupiter.api.Test;
 
@@ -113,6 +117,37 @@ class PolicySnapshotStoreTest {
         assertEquals(
                 PolicySnapshotStore.EvaluationResult.BLOCK,
                 store.evaluate(question("two.example"))
+        );
+    }
+
+    @Test
+    void capturesOneImmutableEvaluatorForTheWholeRequest() throws Exception {
+        PolicySnapshotStore store = new PolicySnapshotStore(
+                PolicySyncMode.REQUIRED
+        );
+        assertThrows(
+                DnsPolicyUnavailableException.class,
+                store::capturePolicy
+        );
+
+        store.activate(snapshot(1, List.of(rule("old.example"))));
+        DnsResolutionPolicy revisionOne = store.capturePolicy();
+        store.activate(snapshot(2, List.of(rule("new.example"))));
+        DnsResolutionPolicy revisionTwo = store.capturePolicy();
+
+        assertThrows(
+                DnsPolicyRefusedException.class,
+                () -> revisionOne.requireAllowed(question("old.example"))
+        );
+        assertDoesNotThrow(
+                () -> revisionOne.requireAllowed(question("new.example"))
+        );
+        assertDoesNotThrow(
+                () -> revisionTwo.requireAllowed(question("old.example"))
+        );
+        assertThrows(
+                DnsPolicyRefusedException.class,
+                () -> revisionTwo.requireAllowed(question("new.example"))
         );
     }
 

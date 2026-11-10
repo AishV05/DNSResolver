@@ -126,6 +126,12 @@ Use these in Prometheus's expression browser or the Grafana Explore view.
 | TCP rejection rate by reason | `sum by (reason) (rate(dns_tcp_connection_rejections_total[5m]))` |
 | Admission-drop rate by reason | `sum by (reason) (rate(dns_request_drops_total[5m]))` |
 | Resolver failure rate | `sum(rate(dns_resolver_failures_total[5m]))` |
+| Parser rejection rate by transport | `sum by (transport) (rate(dns_parser_rejections_total[5m]))` |
+| Positive/negative cache outcomes | `sum by (cache, result) (rate(dns_cache_lookups_total[5m]))` |
+| Bounded-cache eviction rate | `sum by (cache) (rate(dns_cache_evictions_total[5m]))` |
+| Rejected upstream response rate | `rate(dns_upstream_response_rejections_total[5m])` |
+| Nameserver failover rate | `rate(dns_nameserver_failovers_total[5m])` |
+| Rejected CNAME loop rate | `rate(dns_cname_loop_rejections_total[5m])` |
 | Successful handling latency (ms) | `1000 * sum(rate(dns_successful_query_handling_seconds_sum[5m])) / clamp_min(sum(rate(dns_successful_query_handling_seconds_count[5m])), 0.001)` |
 | Is required policy ready? | `dns_policy_ready` |
 | Active policy revision and rules | `dns_policy_snapshot_revision` and `dns_policy_snapshot_rules` |
@@ -153,7 +159,7 @@ fail-closed instance.
 
 ## Alerts
 
-Prometheus evaluates eight local rules:
+Prometheus evaluates ten local rules:
 
 | Alert | Meaning | First response |
 | --- | --- | --- |
@@ -165,6 +171,8 @@ Prometheus evaluates eight local rules:
 | `DnsPolicyNotReady` | Policy is required but no initial valid snapshot has loaded for two minutes. | Check the snapshot endpoint, reader identity/token file, network path, and validation logs. |
 | `DnsPolicySyncStale` | A loaded resolver has exceeded its runtime-derived sync freshness threshold for five minutes. | Check Admin API reachability and authentication while confirming the last-known-good revision remains active. |
 | `DnsPolicySyncFailures` | At least three sync attempts failed in five minutes for five minutes. | Inspect bounded failure-class logs, token rotation, endpoint health, and snapshot validity. |
+| `DnsUpstreamResponsesRejectedHigh` | At least five malformed or uncorrelated upstream responses were rejected in five minutes for five minutes. | Check upstream reachability and response-correlation counters. Rejected packets are not followed or cached. |
+| `DnsCacheEvictionsHigh` | At least one hundred bounded-cache evictions occurred in fifteen minutes for ten minutes. | Compare positive and negative cache pressure with traffic before changing the configured finite limits. |
 
 This stack does **not** include Alertmanager or a notification receiver yet.
 Rules surface in the Prometheus Alerts page only; they do not send email, Slack,
@@ -182,8 +190,8 @@ docker compose --env-file config/local.env exec prometheus \
 ```
 
 The repository validation script also runs the checked-in `promtool test rules`
-scenarios for required-policy readiness, stale last-known-good state,
-and repeated synchronization failures.
+scenarios for required-policy readiness, stale last-known-good state, repeated
+synchronization failures, upstream rejection, and bounded-cache pressure.
 
 ## Retention and cleanup
 
@@ -216,6 +224,11 @@ when intentionally resetting the entire local environment.
    logs.
 7. If the dashboard displays no traffic, send a DNS query and wait up to one
    scrape interval (15 seconds) before checking the request-rate panel.
+8. If upstream rejection rises, compare it with parser rejection and
+   nameserver failover. Do not disable response correlation to make the alert
+   disappear.
+9. If cache eviction rises, identify whether positive or negative entries are
+   under pressure and confirm the workload before increasing finite limits.
 
 Never paste `config/local.env`, Bearer tokens, database passwords, or Grafana
 credentials into logs, tickets, screenshots, or chat.

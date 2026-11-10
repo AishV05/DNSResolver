@@ -33,6 +33,47 @@ upstream transport. It must not depend on `dns-server`, a web framework, a
 database, or a deployment tool. `dns-server` owns process lifecycle plus UDP
 and TCP client transports and depends on `dns-core`.
 
+DNS wire data crosses an explicit trust boundary at both client and upstream
+parsers. The Week 18 contract requires bounded decoding, exact upstream
+correlation, delegation and alias validation, and cache provenance before
+packet-derived state is reused. Week 18A establishes the threat model,
+malicious-packet corpus, and deterministic hierarchy. Week 18B enforces the
+wire-structure boundary with checked reads, bounded and reversible name
+decoding, exact section consumption, immutable parsed state, and canonical
+uncompressed RDATA for supported record types whose data contains names. Week
+18C gives each upstream query a full-range unpredictable transaction ID, sends
+iterative queries with `RD=0`, uses connected UDP source filtering, applies the
+same exact question correlation to UDP and TCP, bounds receives and framed TCP
+reads with absolute deadlines plus a fixed UDP discard budget, and sanitizes
+flags before producing a client response. Week 18D rejects non-`IN` recursion
+and zone-transfer question types, selects only strict-descending
+bailiwick-relevant delegations, links glue to in-bailiwick NS targets, resolves
+out-of-bailiwick nameservers independently from the roots, fails over across
+eligible candidates, and follows only relevant authoritative CNAME/terminal
+answers under request-wide bounds. Week 18E stores only complete validated
+outcomes in finite LRU caches, normalizes TTLs per RRset, ages each RRset from
+a monotonic clock, derives negative lifetimes from a relevant SOA, and applies
+one captured policy view to every client-visible CNAME hop, including cache
+hits. Week 18F completes the adversarial evidence with a bounded standalone
+Jazzer gate, dnsjava interoperability checks, and fixed-cardinality parser,
+cache, upstream-rejection, failover, and alias-loop telemetry. See [the DNS data-plane
+threat model](security/dns-threat-model.md),
+[ADR 0020](adr/0020-dns-wire-trust-boundary.md),
+[ADR 0021](adr/0021-bounded-dns-wire-decoding.md),
+[ADR 0022](adr/0022-correlated-upstream-dns-exchanges.md),
+[ADR 0023](adr/0023-bailiwick-referrals-and-bounded-aliases.md),
+[ADR 0024](adr/0024-bounded-cache-and-alias-policy-integrity.md), and
+[ADR 0025](adr/0025-adversarial-proof-and-privacy-safe-observability.md).
+
+After parsing and EDNS-version handling, `dns-server` accepts exactly one
+standard class-`IN` question for recursive work. Other QCLASS values and
+`AXFR`/`IXFR` return `NOTIMP` before policy, cache, or upstream I/O. The policy
+snapshot evaluator is captured once for the complete request. The original
+client QNAME and every accepted CNAME target on the client answer chain are
+checked against that view before lookup, return, or cache insertion. Warm cache
+hits recheck their CNAME targets. Resolver-created nameserver-address lookups
+use a separate infrastructure scope and do not pass through the client policy.
+
 The DNS process has a second operational HTTP listener for
 Prometheus-format metrics. It derives a fixed set of counters and a successful
 handling-duration sum/count from the existing thread-safe `ServerMetrics`
@@ -60,6 +101,9 @@ least-privilege credential rather than making management metrics public.
 `dns-core`, while `dns-core` depends on neither process. `dns-server` polls one
 authenticated snapshot endpoint in a background
 thread, but the Admin API and its database never sit on the DNS query path.
+The Admin API does not claim to expose the resolver's live root-server or
+runtime configuration; operational truth for the data plane is exported by
+the DNS process itself.
 
 The management plane uses stateless opaque Bearer tokens.
 An authenticated principal has one or more persisted roles: `VIEWER` may read

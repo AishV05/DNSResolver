@@ -585,9 +585,22 @@ public class DnsPacketParserTest {
                 900
         );
 
+        byte[] primaryServer = encodeName("ns.example.com");
+        byte[] responsibleMailbox = encodeName("hostmaster.example.com");
+
         buffer.putShort(
-                (short) 0
+                (short) (primaryServer.length
+                        + responsibleMailbox.length
+                        + 20)
         );
+
+        buffer.put(primaryServer);
+        buffer.put(responsibleMailbox);
+        buffer.putInt(1);
+        buffer.putInt(7_200);
+        buffer.putInt(3_600);
+        buffer.putInt(1_209_600);
+        buffer.putInt(300);
 
         return slice(buffer);
     }

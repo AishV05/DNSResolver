@@ -71,7 +71,6 @@ class AdminSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/admin/status",
-                                "/api/v1/admin/resolver/configuration",
                                 "/api/v1/admin/policies",
                                 "/api/v1/admin/policies/**"
                         ).hasAnyRole(

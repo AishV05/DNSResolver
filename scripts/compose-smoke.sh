@@ -238,7 +238,9 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     DNS_TCP_ACCEPT_BACKLOG DNS_TCP_IDLE_TIMEOUT_MILLIS \
     DNS_TCP_MESSAGE_TIMEOUT_MILLIS DNS_TCP_MAX_QUERIES_PER_CONNECTION \
     DNS_TCP_MAX_REQUEST_BYTES \
-    DNS_UPSTREAM_MAX_ATTEMPTS PROMETHEUS_PORT PROMETHEUS_RETENTION_TIME \
+    DNS_UPSTREAM_MAX_ATTEMPTS DNS_CACHE_POSITIVE_MAX_ENTRIES \
+    DNS_CACHE_NEGATIVE_MAX_ENTRIES DNS_CACHE_POSITIVE_MAX_TTL_SECONDS \
+    DNS_CACHE_NEGATIVE_MAX_TTL_SECONDS PROMETHEUS_PORT PROMETHEUS_RETENTION_TIME \
     DNS_POLICY_READER_TOKEN_FILE DNS_POLICY_CONNECT_TIMEOUT_MILLIS \
     DNS_POLICY_REQUEST_TIMEOUT_MILLIS DNS_POLICY_REFRESH_INTERVAL_MILLIS \
     DNS_POLICY_INITIAL_BACKOFF_MILLIS DNS_POLICY_MAX_BACKOFF_MILLIS \
@@ -255,6 +257,10 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     printf '%s\n' 'DNS_REQUEST_BURST_CAPACITY=200'
     printf '%s\n' 'DNS_UPSTREAM_TIMEOUT_MILLIS=100'
     printf '%s\n' 'DNS_UPSTREAM_MAX_ATTEMPTS=1'
+    printf '%s\n' 'DNS_CACHE_POSITIVE_MAX_ENTRIES=64'
+    printf '%s\n' 'DNS_CACHE_NEGATIVE_MAX_ENTRIES=64'
+    printf '%s\n' 'DNS_CACHE_POSITIVE_MAX_TTL_SECONDS=600'
+    printf '%s\n' 'DNS_CACHE_NEGATIVE_MAX_TTL_SECONDS=120'
     printf '%s\n' "DNS_POLICY_READER_TOKEN_FILE=${POLICY_TOKEN_FILE}"
     printf '%s\n' 'DNS_POLICY_CONNECT_TIMEOUT_MILLIS=500'
     printf '%s\n' 'DNS_POLICY_REQUEST_TIMEOUT_MILLIS=1000'
@@ -322,7 +328,17 @@ compose exec -T prometheus sh -ec \
         | grep -Fq "dns_policy_mode{mode=\"required\"} 1"
     printf "%s\n" "$metrics" | grep -Fq "dns_policy_ready 1"
     printf "%s\n" "$metrics" | grep -Fq "dns_policy_snapshot_loaded 1"
-    printf "%s\n" "$metrics" | grep -Fq "dns_policy_sync_stale 0"'
+    printf "%s\n" "$metrics" | grep -Fq "dns_policy_sync_stale 0"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_parser_rejections_total{transport=\"udp\"}"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_parser_rejections_total{transport=\"tcp\"}"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_cache_lookups_total{cache=\"positive\",result=\"hit\"}"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_cache_lookups_total{cache=\"negative\",result=\"miss\"}"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_upstream_response_rejections_total"'
 compose exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
 compose exec -T prometheus promtool check rules /etc/prometheus/rules/dns-alerts.yml
 

@@ -45,7 +45,7 @@ public class RecursiveResolverTest {
 
         DnsMessage authoritativeResponse =
                 createResponse(
-                        0x8180,
+                        0x8580,
                         question,
                         List.of(answer),
                         List.of(),
@@ -127,7 +127,7 @@ public class RecursiveResolverTest {
 
         DnsMessage upstreamResponse =
                 createResponse(
-                        0x8180,
+                        0x8580,
                         question,
                         List.of(answer),
                         List.of(),
@@ -233,7 +233,7 @@ public class RecursiveResolverTest {
 
         DnsMessage aResponse =
                 createResponse(
-                        0x8180,
+                        0x8580,
                         aQuestion,
                         List.of(aRecord),
                         List.of(),
@@ -242,7 +242,7 @@ public class RecursiveResolverTest {
 
         DnsMessage mxResponse =
                 createResponse(
-                        0x8180,
+                        0x8580,
                         mxQuestion,
                         List.of(mxRecord),
                         List.of(),
@@ -303,9 +303,7 @@ public class RecursiveResolverTest {
                         2,
                         1,
                         86400,
-                        new byte[] {
-                                1
-                        }
+                        encodeName("ns1.example.com")
                 );
 
         DnsRecord glue =
@@ -341,7 +339,7 @@ public class RecursiveResolverTest {
 
         DnsMessage finalResponse =
                 createResponse(
-                        0x8180,
+                        0x8580,
                         question,
                         List.of(answer),
                         List.of(),
@@ -428,7 +426,7 @@ public class RecursiveResolverTest {
 
         client.addResponse(
                 createResponse(
-                        0x8180,
+                        0x8580,
                         question,
                         List.of(answer),
                         List.of(),
@@ -593,11 +591,11 @@ void shouldCacheNxDomain() throws Exception {
             );
 
     DnsRecord soa =
-            createSoaRecord();
+            createSoaRecord("example");
 
     DnsMessage nxDomainResponse =
             createResponse(
-                    0x8183,
+                    0x8583,
                     question,
                     List.of(),
                     List.of(soa),
@@ -665,11 +663,11 @@ void shouldReturnNxDomainFromNegativeCache()
             );
 
     DnsRecord soa =
-            createSoaRecord();
+            createSoaRecord("example");
 
     DnsMessage nxDomainResponse =
             createResponse(
-                    0x8183,
+                    0x8583,
                     question,
                     List.of(),
                     List.of(soa),
@@ -742,11 +740,11 @@ void shouldCacheNoData() throws Exception {
             );
 
     DnsRecord soa =
-            createSoaRecord();
+            createSoaRecord("google.com");
 
     DnsMessage noDataResponse =
             createResponse(
-                    0x8180,
+                    0x8580,
                     question,
                     List.of(),
                     List.of(soa),
@@ -830,24 +828,27 @@ void shouldKeepNxDomainAndNoDataSeparate()
                     noDataQuestion
             );
 
-    DnsRecord soa =
-            createSoaRecord();
+    DnsRecord nxDomainSoa =
+            createSoaRecord("example");
+
+    DnsRecord noDataSoa =
+            createSoaRecord("google.com");
 
     DnsMessage nxDomainResponse =
             createResponse(
-                    0x8183,
+                    0x8583,
                     nxDomainQuestion,
                     List.of(),
-                    List.of(soa),
+                    List.of(nxDomainSoa),
                     List.of()
             );
 
     DnsMessage noDataResponse =
             createResponse(
-                    0x8180,
+                    0x8580,
                     noDataQuestion,
                     List.of(),
-                    List.of(soa),
+                    List.of(noDataSoa),
                     List.of()
             );
 
@@ -918,7 +919,7 @@ void shouldKeepNxDomainAndNoDataSeparate()
     );
 }
 
-private DnsRecord createSoaRecord() {
+private DnsRecord createSoaRecord(String owner) {
 
     byte[] rdata = new byte[] {
             1, 'a', 0,
@@ -933,11 +934,20 @@ private DnsRecord createSoaRecord() {
     };
 
     return new DnsRecord(
-            "example.com",
+            owner,
             6,
             1,
             900,
             rdata
+    );
+}
+
+private byte[] encodeName(String name) {
+    java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(255);
+    com.ayushman.dns.protocol.DnsNameCodec.encode(name, buffer);
+    return java.util.Arrays.copyOf(
+            buffer.array(),
+            buffer.position()
     );
 }
 }

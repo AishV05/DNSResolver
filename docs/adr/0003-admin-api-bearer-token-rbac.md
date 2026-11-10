@@ -25,7 +25,7 @@ The roles are deliberately small and explicit:
 
 | Role | Permissions |
 | --- | --- |
-| `VIEWER` | Read admin status, resolver configuration, and policy records |
+| `VIEWER` | Read admin status and policy records |
 | `POLICY_EDITOR` | `VIEWER` permissions plus policy creation, update, and deletion |
 | `POLICY_SNAPSHOT_READER` | Read only the internal versioned policy snapshot |
 | `ADMIN` | All management-plane permissions, including identity and token lifecycle |

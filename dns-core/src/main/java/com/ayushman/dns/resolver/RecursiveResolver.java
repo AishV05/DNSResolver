@@ -1,43 +1,45 @@
 package com.ayushman.dns.resolver;
 
 import java.util.List;
+import java.util.function.LongSupplier;
 
 import com.ayushman.dns.cache.CachedDnsData;
 import com.ayushman.dns.cache.DnsCache;
 import com.ayushman.dns.cache.NegativeCache;
 import com.ayushman.dns.cache.NegativeCacheEntry;
 import com.ayushman.dns.cache.NegativeCacheType;
-import com.ayushman.dns.cache.SoaRecordUtil;
+import com.ayushman.dns.cache.ResolverCacheConfig;
+import com.ayushman.dns.policy.DnsResolutionPolicy;
 import com.ayushman.dns.protocol.DnsMessage;
 import com.ayushman.dns.protocol.DnsQuestion;
 import com.ayushman.dns.protocol.DnsRecord;
 
+/** Iterative resolver with bounded, TTL-aware positive and negative caches. */
 public class RecursiveResolver implements DnsResolver {
 
-    private final UpstreamDnsClient client;
+    private static final int TYPE_SOA = 6;
+    private static final int RCODE_MASK = 0x000F;
 
-    private final List<String> rootServers;
-
-    private final DnsCache cache =
-            new DnsCache();
-
-    private final NegativeCache negativeCache =
-            new NegativeCache();
+    private final IterativeResolverEngine iterativeResolver;
+    private final DnsCache cache;
+    private final NegativeCache negativeCache;
+    private final Object cacheMutationLock = new Object();
 
     public RecursiveResolver() {
         this(
                 new UpstreamDnsClient(),
-                RootServers.ROOT_SERVERS
+                RootServers.ROOT_SERVERS,
+                ResolverCacheConfig.defaults(),
+                System::nanoTime
         );
     }
 
-    public RecursiveResolver(
-            UpstreamDnsClient client
-    ) {
-
+    public RecursiveResolver(UpstreamDnsClient client) {
         this(
                 client,
-                RootServers.ROOT_SERVERS
+                RootServers.ROOT_SERVERS,
+                ResolverCacheConfig.defaults(),
+                System::nanoTime
         );
     }
 
@@ -45,405 +47,207 @@ public class RecursiveResolver implements DnsResolver {
             UpstreamDnsClient client,
             List<String> rootServers
     ) {
+        this(
+                client,
+                rootServers,
+                ResolverCacheConfig.defaults(),
+                System::nanoTime
+        );
+    }
 
-        if (client == null) {
+    public RecursiveResolver(
+            UpstreamDnsClient client,
+            List<String> rootServers,
+            ResolverCacheConfig cacheConfig
+    ) {
+        this(client, rootServers, cacheConfig, System::nanoTime);
+    }
+
+    public RecursiveResolver(
+            UpstreamDnsClient client,
+            List<String> rootServers,
+            ResolverCacheConfig cacheConfig,
+            LongSupplier ticker
+    ) {
+        this(
+                client,
+                rootServers,
+                cacheConfig,
+                ticker,
+                ResolverObserver.NOOP
+        );
+    }
+
+    public RecursiveResolver(
+            UpstreamDnsClient client,
+            List<String> rootServers,
+            ResolverCacheConfig cacheConfig,
+            LongSupplier ticker,
+            ResolverObserver observer
+    ) {
+        if (client == null || cacheConfig == null || ticker == null
+                || observer == null) {
             throw new IllegalArgumentException(
-                    "client must not be null"
+                    "resolver client, cache config, and ticker must not be null"
             );
         }
-
         if (rootServers == null || rootServers.isEmpty()) {
             throw new IllegalArgumentException(
                     "rootServers must not be empty"
             );
         }
 
-        this.client = client;
-        this.rootServers = List.copyOf(rootServers);
+        iterativeResolver = new IterativeResolverEngine(
+                client,
+                rootServers,
+                observer
+        );
+        cache = new DnsCache(
+                cacheConfig.positiveMaxEntries(),
+                cacheConfig.positiveMaxTtlSeconds(),
+                ticker,
+                observer
+        );
+        negativeCache = new NegativeCache(
+                cacheConfig.negativeMaxEntries(),
+                cacheConfig.negativeMaxTtlSeconds(),
+                ticker,
+                observer
+        );
     }
 
     @Override
-    public DnsMessage resolve(DnsMessage clientQuery)
-            throws Exception {
+    public DnsMessage resolve(DnsMessage clientQuery) throws Exception {
+        return resolve(clientQuery, DnsResolutionPolicy.ALLOW_ALL);
+    }
 
-        DnsQuestion question =
-                clientQuery.questions().get(0);
+    @Override
+    public DnsMessage resolve(
+            DnsMessage clientQuery,
+            DnsResolutionPolicy policy
+    ) throws Exception {
+        DnsResolutionPolicyEnforcer.requireOriginalQuestionAllowed(
+                clientQuery,
+                policy
+        );
+        DnsQuestion question = clientQuery.questions().get(0);
 
-        NegativeCacheEntry negativeCached =
-                negativeCache.get(
-                        question,
-                        NegativeCacheType.NXDOMAIN
-                );
-
-        if (negativeCached != null) {
-
-            long remainingTtl =
-                    negativeCached.remainingTtl();
-
-            System.out.println(
-                    "NEGATIVE CACHE HIT: "
-                            + question.name()
-                            + " NXDOMAIN"
-                            + " (TTL="
-                            + remainingTtl
-                            + " seconds)"
+        NegativeCacheEntry negative = negativeCache.get(
+                question,
+                NegativeCacheType.NXDOMAIN
+        );
+        if (negative == null) {
+            negative = negativeCache.get(
+                    question,
+                    NegativeCacheType.NODATA
             );
-
+        }
+        if (negative != null) {
+            DnsResolutionPolicyEnforcer.requireCnameTargetsAllowed(
+                    negative.response(),
+                    question,
+                    policy
+            );
             return ResolverResponseFactory.fromUpstream(
                     clientQuery,
-                    negativeCached.response()
+                    negative.response()
             );
         }
 
-        negativeCached =
-                negativeCache.get(
-                        question,
-                        NegativeCacheType.NODATA
-                );
-
-        if (negativeCached != null) {
-
-            long remainingTtl =
-                    negativeCached.remainingTtl();
-
-            System.out.println(
-                    "NEGATIVE CACHE HIT: "
-                            + question.name()
-                            + " "
-                            + question.type()
-                            + " NODATA"
-                            + " (TTL="
-                            + remainingTtl
-                            + " seconds)"
-            );
-
-            return ResolverResponseFactory.fromUpstream(
-                    clientQuery,
-                    negativeCached.response()
-            );
-        }
-
-        CachedDnsData cached =
-                cache.get(question);
-
+        CachedDnsData cached = cache.get(question);
         if (cached != null) {
-
-            long remainingTtl =
-                    cache.remainingTtl(question);
-
-            System.out.println(
-                    "CACHE HIT: "
-                            + question.name()
-                            + " (TTL="
-                            + remainingTtl
-                            + " seconds)"
-            );
-
-            return ResolverResponseFactory.create(
+            DnsMessage cachedResponse = ResolverResponseFactory.create(
                     clientQuery,
-                    cached,
-                    remainingTtl
+                    cached
             );
+            DnsResolutionPolicyEnforcer.requireCnameTargetsAllowed(
+                    cachedResponse,
+                    question,
+                    policy
+            );
+            return cachedResponse;
         }
 
-        System.out.println(
-                "CACHE MISS: "
-                        + question.name()
+        DnsMessage upstreamResponse = iterativeResolver.resolve(
+                question,
+                policy
+        );
+        DnsResolutionPolicyEnforcer.requireCnameTargetsAllowed(
+                upstreamResponse,
+                question,
+                policy
         );
 
-        String currentServer =
-                rootServers.get(0);
-
-        int rootServerIndex = 0;
-
-        boolean queryingRootServer = true;
-
-        int maxDepth = 20;
-
-        while (maxDepth-- > 0) {
-
-            System.out.println(
-                    "Querying Server: "
-                            + currentServer
-            );
-
-            DnsMessage upstreamQuery =
-                    ResolverQueryFactory.create(question);
-
-            DnsMessage upstreamResponse;
-
-            try {
-                upstreamResponse =
-                        client.query(
-                                currentServer,
-                                upstreamQuery
-                        );
-            } catch (UpstreamDnsException e) {
-
-                if (queryingRootServer
-                        && rootServerIndex
-                        < rootServers.size() - 1) {
-
-                    currentServer =
-                            rootServers.get(
-                                    ++rootServerIndex
-                            );
-
-                    System.out.println(
-                            "Root server failed; retrying with "
-                                    + currentServer
-                    );
-
-                    continue;
-                }
-
-                throw e;
-            }
-
-            System.out.println("--------------------------------");
-
-            System.out.println(
-                    "Answers     : "
-                            + upstreamResponse.answers().size()
-            );
-
-            System.out.println(
-                    "Authorities : "
-                            + upstreamResponse.authorities().size()
-            );
-
-            System.out.println(
-                    "Additionals : "
-                            + upstreamResponse.additionals().size()
-            );
-
-            for (DnsRecord record :
-                    upstreamResponse.authorities()) {
-
-                System.out.println(
-                        "AUTH -> type="
-                                + record.type()
-                                + " name="
-                                + record.name()
-                );
-            }
-
-            for (DnsRecord record :
-                    upstreamResponse.additionals()) {
-
-                System.out.println(
-                        "ADD -> type="
-                                + record.type()
-                                + " name="
-                                + record.name()
-                );
-            }
-
-            System.out.println("--------------------------------");
-
-            int rcode =
-                    upstreamResponse.header().flags()
-                            & 0x000F;
-
-            if (rcode == 3) {
-
-                System.out.println(
-                        "NXDOMAIN received for "
-                                + question.name()
-                );
-
-                DnsRecord soa =
-                        findSoaRecord(upstreamResponse);
-
-                if (soa != null) {
-
-                    long negativeTtl =
-                            SoaRecordUtil.negativeTtl(soa);
-
-                    if (negativeTtl > 0) {
-
-                        long now =
-                                System.currentTimeMillis();
-
-                        long expiresAt =
-                                now
-                                        + (negativeTtl * 1000);
-
-                        NegativeCacheEntry entry =
-                                new NegativeCacheEntry(
-                                        upstreamResponse,
-                                        now,
-                                        expiresAt
-                                );
-
-                        negativeCache.put(
-                                question,
-                                NegativeCacheType.NXDOMAIN,
-                                entry
-                        );
-
-                        System.out.println(
-                                "Stored NXDOMAIN in negative cache "
-                                        + "(TTL="
-                                        + negativeTtl
-                                        + " seconds)"
-                        );
-                    }
-                }
-
-                return ResolverResponseFactory.fromUpstream(
-                        clientQuery,
-                        upstreamResponse
-                );
-            }
-
-            if (rcode == 0
-                    && upstreamResponse.answers().isEmpty()) {
-
-                DnsRecord soa =
-                        findSoaRecord(upstreamResponse);
-
-                if (soa != null) {
-
-                    long negativeTtl =
-                            SoaRecordUtil.negativeTtl(soa);
-
-                    if (negativeTtl > 0) {
-
-                        long now =
-                                System.currentTimeMillis();
-
-                        long expiresAt =
-                                now
-                                        + (negativeTtl * 1000);
-
-                        NegativeCacheEntry entry =
-                                new NegativeCacheEntry(
-                                        upstreamResponse,
-                                        now,
-                                        expiresAt
-                                );
-
-                        negativeCache.put(
-                                question,
-                                NegativeCacheType.NODATA,
-                                entry
-                        );
-
-                        System.out.println(
-                                "Stored NODATA in negative cache "
-                                        + "(TTL="
-                                        + negativeTtl
-                                        + " seconds)"
-                        );
-                    }
-
-                    return ResolverResponseFactory.fromUpstream(
-                            clientQuery,
+        int rcode = upstreamResponse.header().flags() & RCODE_MASK;
+        if (rcode == 3) {
+            if (upstreamResponse.answers().isEmpty()
+                    && findSoaRecord(upstreamResponse) != null) {
+                synchronized (cacheMutationLock) {
+                    cache.invalidateName(question);
+                    negativeCache.invalidateName(question);
+                    negativeCache.put(
+                            question,
+                            NegativeCacheType.NXDOMAIN,
                             upstreamResponse
                     );
                 }
             }
-
-            if (!upstreamResponse.answers().isEmpty()) {
-
-                long ttl =
-                        upstreamResponse
-                                .answers()
-                                .get(0)
-                                .ttl();
-
-                cache.put(
-                        question,
-                        upstreamResponse,
-                        ttl
-                );
-
-                System.out.println(
-                        "Stored in cache (TTL="
-                                + ttl
-                                + " seconds)"
-                );
-
-                CachedDnsData cachedResponse =
-                        cache.get(question);
-
-                long remainingTtl =
-                        cache.remainingTtl(question);
-
-                return ResolverResponseFactory.create(
-                        clientQuery,
-                        cachedResponse,
-                        remainingTtl
-                );
-            }
-
-            if (upstreamResponse.authorities().isEmpty()) {
-
-                throw new RuntimeException(
-                        "No authority records found."
-                );
-            }
-
-            String nextServer =
-                    findGlueRecord(upstreamResponse);
-
-            if (nextServer == null) {
-
-                throw new RuntimeException(
-                        "No glue record found."
-                );
-            }
-
-            System.out.println(
-                    "Following delegation -> "
-                            + nextServer
+            return ResolverResponseFactory.fromUpstream(
+                    clientQuery,
+                    upstreamResponse
             );
-
-            currentServer =
-                    nextServer;
-
-            queryingRootServer = false;
         }
 
-        throw new RuntimeException(
-                "Maximum recursion depth exceeded."
+        if (rcode == 0 && upstreamResponse.answers().isEmpty()) {
+            if (findSoaRecord(upstreamResponse) != null) {
+                synchronized (cacheMutationLock) {
+                    cache.invalidate(question);
+                    negativeCache.invalidate(
+                            question,
+                            NegativeCacheType.NXDOMAIN
+                    );
+                    negativeCache.put(
+                            question,
+                            NegativeCacheType.NODATA,
+                            upstreamResponse
+                    );
+                }
+            }
+            return ResolverResponseFactory.fromUpstream(
+                    clientQuery,
+                    upstreamResponse
+            );
+        }
+
+        if (rcode == 0 && !upstreamResponse.answers().isEmpty()) {
+            synchronized (cacheMutationLock) {
+                negativeCache.invalidate(
+                        question,
+                        NegativeCacheType.NXDOMAIN
+                );
+                negativeCache.invalidate(
+                        question,
+                        NegativeCacheType.NODATA
+                );
+                cache.put(question, upstreamResponse);
+            }
+            return ResolverResponseFactory.fromUpstream(
+                    clientQuery,
+                    upstreamResponse
+            );
+        }
+
+        throw new UpstreamDnsException(
+                "Resolution completed without a usable answer"
         );
     }
 
-    private DnsRecord findSoaRecord(
-            DnsMessage response
-    ) {
-
-        for (DnsRecord record :
-                response.authorities()) {
-
-            if (record.type() == 6) {
+    private DnsRecord findSoaRecord(DnsMessage response) {
+        for (DnsRecord record : response.authorities()) {
+            if (record.type() == TYPE_SOA) {
                 return record;
             }
         }
-
-        return null;
-    }
-
-    private String findGlueRecord(
-            DnsMessage response
-    ) {
-
-        for (DnsRecord record :
-                response.additionals()) {
-
-            if (record.type() == 1) {
-
-                String ip =
-                        DnsRecordUtil.getIpv4Address(record);
-
-                if (ip != null) {
-                    return ip;
-                }
-            }
-        }
-
         return null;
     }
 }

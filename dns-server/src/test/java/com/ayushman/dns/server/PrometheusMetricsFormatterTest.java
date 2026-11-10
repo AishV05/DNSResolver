@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import com.ayushman.dns.policy.DnsPolicySnapshot;
+import com.ayushman.dns.resolver.ResolverObserver;
 import org.junit.jupiter.api.Test;
 
 class PrometheusMetricsFormatterTest {
@@ -37,6 +38,16 @@ class PrometheusMetricsFormatterTest {
         metrics.recordTcpConnectionQueueRejection();
         metrics.recordTcpConnectionTimeout();
         metrics.recordTcpProtocolError();
+        metrics.recordMalformedRequest(DnsTransport.TCP);
+        metrics.cacheLookup(ResolverObserver.CacheKind.POSITIVE, true);
+        metrics.cacheLookup(ResolverObserver.CacheKind.POSITIVE, false);
+        metrics.cacheLookup(ResolverObserver.CacheKind.NEGATIVE, true);
+        metrics.cacheLookup(ResolverObserver.CacheKind.NEGATIVE, false);
+        metrics.cacheEviction(ResolverObserver.CacheKind.POSITIVE);
+        metrics.cacheEviction(ResolverObserver.CacheKind.NEGATIVE);
+        metrics.upstreamResponseRejected();
+        metrics.nameserverFailover();
+        metrics.cnameLoopRejected();
         PolicySnapshotStore policyStore = new PolicySnapshotStore(
                 PolicySyncMode.REQUIRED
         );
@@ -91,7 +102,30 @@ class PrometheusMetricsFormatterTest {
         assertTrue(output.contains(
                 "dns_request_drops_total{reason=\"queue_full\"} 1\n"
         ));
-        assertTrue(output.contains("dns_malformed_requests_total 1\n"));
+        assertTrue(output.contains("dns_malformed_requests_total 2\n"));
+        assertTrue(output.contains(
+                "dns_parser_rejections_total{transport=\"udp\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_parser_rejections_total{transport=\"tcp\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_cache_lookups_total{cache=\"positive\",result=\"hit\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_cache_lookups_total{cache=\"negative\",result=\"miss\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_cache_evictions_total{cache=\"positive\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_cache_evictions_total{cache=\"negative\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_upstream_response_rejections_total 1\n"
+        ));
+        assertTrue(output.contains("dns_nameserver_failovers_total 1\n"));
+        assertTrue(output.contains("dns_cname_loop_rejections_total 1\n"));
         assertTrue(output.contains("dns_edns_unsupported_version_total 1\n"));
         assertTrue(output.contains("dns_resolved_requests_total 2\n"));
         assertTrue(output.contains("dns_resolver_failures_total 1\n"));
