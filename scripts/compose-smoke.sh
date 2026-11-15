@@ -13,14 +13,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUN_SUFFIX="$(date +%s)-$$-${RANDOM}"
 PROJECT_NAME="dns-ci-smoke-${RUN_SUFFIX}"
-ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-compose-smoke.XXXXXX")"
-ADMIN_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-admin-token.XXXXXX")"
-POLICY_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-token.XXXXXX")"
-RESOLVER_AGENT_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-resolver-agent-token.XXXXXX")"
-FLEET_METRICS_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-fleet-metrics-token.XXXXXX")"
-POLICY_TOKEN_BACKUP_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-token-backup.XXXXXX")"
-POLICY_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-state.XXXXXX")"
-GRAFANA_PASSWORD_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-grafana-password.XXXXXX")"
+SMOKE_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dns-compose-smoke.XXXXXX")"
+chmod 0700 "${SMOKE_TEMP_DIR}"
+ENV_FILE="${SMOKE_TEMP_DIR}/compose.env"
+ADMIN_TOKEN_FILE="${SMOKE_TEMP_DIR}/admin-token"
+POLICY_TOKEN_FILE="${SMOKE_TEMP_DIR}/policy-token"
+RESOLVER_AGENT_TOKEN_FILE="${SMOKE_TEMP_DIR}/resolver-agent-token"
+FLEET_METRICS_TOKEN_FILE="${SMOKE_TEMP_DIR}/fleet-metrics-token"
+POLICY_TOKEN_BACKUP_FILE="${SMOKE_TEMP_DIR}/policy-token-backup"
+POLICY_STATE_FILE="${SMOKE_TEMP_DIR}/policy-state"
+GRAFANA_PASSWORD_FILE="${SMOKE_TEMP_DIR}/grafana-password"
 COMPOSE_ATTEMPTED=false
 
 SMOKE_DNS_PORT="${SMOKE_DNS_PORT:-15354}"
@@ -91,6 +93,7 @@ cleanup() {
         "${POLICY_TOKEN_FILE}" "${POLICY_TOKEN_BACKUP_FILE}" \
         "${RESOLVER_AGENT_TOKEN_FILE}" "${POLICY_STATE_FILE}" \
         "${FLEET_METRICS_TOKEN_FILE}" "${GRAFANA_PASSWORD_FILE}"
+    rmdir "${SMOKE_TEMP_DIR}" 2>/dev/null || true
     exit "${exit_code}"
 }
 
