@@ -62,9 +62,10 @@ transport values.
 
 Prometheus alerts when required policy is not ready, synchronization is stale,
 or failures repeat. Grafana displays policy readiness, revision/rule count,
-sync freshness/outcomes, and decisions by transport. The Admin API continues
-to report `DATA_PLANE_UNOBSERVED`: scraped resolver telemetry is not a
-control-plane acknowledgement protocol.
+sync freshness/outcomes, and decisions by transport. At this phase the Admin
+API continued to report `DATA_PLANE_UNOBSERVED`: scraped resolver telemetry is
+not a control-plane acknowledgement protocol. ADRs 0026-0029 later add a
+separate authenticated report channel and fleet-convergence view.
 
 ## Consequences
 

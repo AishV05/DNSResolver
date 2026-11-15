@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; amended by ADR 0030
 
 ## Context
 
@@ -33,6 +33,10 @@ Add Prometheus and Grafana to the local Docker Compose stack.
   scrape identity is required before adding it.
 
 ## Consequences
+
+ADR 0030 extends this stack with an authenticated, curated Admin fleet target
+on a separate internal network. The original anonymous-health-only boundary
+remains intact; Prometheus uses a dedicated least-privilege token.
 
 The development stack gains useful operational visibility while retaining the
 data-plane/control-plane separation. Monitoring outages do not block DNS

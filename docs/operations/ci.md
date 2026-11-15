@@ -62,11 +62,14 @@ bundle tamper rejection, and backup-evidence validation. It uses generated
 fixtures and does not print or require a completed `config/local.env`, deploy a
 release, query public DNS, or restore a live database.
 `compose-smoke.sh` requires Docker and exercises a temporary local stack. It
-provisions a real least-privilege policy reader, activates a BLOCK rule, checks
-UDP/TCP `REFUSED`, proves last-known-good enforcement across an Admin outage
-and invalid credential, restores synchronization, and disables/deletes the
-rule. It must finish its cleanup path before another smoke run starts; do not
-point it at a shared Docker context or use it as a deployment command.
+provisions least-privilege policy-reader, resolver-agent, and fleet-metrics
+identities, verifies both Prometheus targets, and checks session leasing plus
+ordered runtime-report persistence against PostgreSQL,
+activates a BLOCK rule, checks UDP/TCP `REFUSED`, proves last-known-good
+enforcement across an Admin outage and invalid credential, restores
+synchronization, and disables/deletes the rule. It must finish its cleanup
+path before another smoke run starts; do not point it at a shared Docker
+context or use it as a deployment command.
 
 If one of its default host ports is occupied, override only the smoke-specific
 value; the script validates each port before generating its temporary config:

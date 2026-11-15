@@ -1,7 +1,8 @@
 package com.ayushman.dns.admin;
 
-import com.ayushman.dns.admin.policy.DnsPolicySnapshotService;
-import com.ayushman.dns.admin.policy.DnsPolicySnapshotService.DnsPolicyPublicationStatus;
+import com.ayushman.dns.admin.fleet.ResolverFleetStatusResponse;
+import com.ayushman.dns.admin.fleet.ResolverFleetStatusService;
+import com.ayushman.dns.fleet.ResolverFleetPolicyState;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -13,27 +14,26 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/admin")
 public class AdminStatusController {
 
-    private final DnsPolicySnapshotService policySnapshotService;
+    private final ResolverFleetStatusService fleetStatusService;
 
     public AdminStatusController(
-            DnsPolicySnapshotService policySnapshotService
+            ResolverFleetStatusService fleetStatusService
     ) {
-        this.policySnapshotService = policySnapshotService;
+        this.fleetStatusService = fleetStatusService;
     }
 
     @GetMapping("/status")
     public AdminStatusResponse status() {
-        DnsPolicyPublicationStatus publication =
-                policySnapshotService.currentPublicationStatus();
+        ResolverFleetStatusResponse fleet = fleetStatusService.currentStatus();
         return new AdminStatusResponse(
                 "dns-admin-api",
                 "UP",
                 "v1",
-                publication.persistedRuleCount(),
-                publication.enabledRuleCount(),
-                publication.revision(),
+                fleet.persistedPolicyRuleCount(),
+                fleet.publishedPolicyRuleCount(),
+                fleet.publishedPolicyRevision(),
                 "SNAPSHOT_AVAILABLE",
-                "DATA_PLANE_UNOBSERVED"
+                fleet.policyEnforcement()
         );
     }
 
@@ -45,7 +45,7 @@ public class AdminStatusController {
             long enabledPolicyRules,
             long publishedPolicyRevision,
             String policyDistribution,
-            String policyEnforcement
+            ResolverFleetPolicyState policyEnforcement
     ) {
     }
 }

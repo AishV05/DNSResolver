@@ -83,8 +83,9 @@ containing DNS names, client addresses, tokens, or exception messages. The
 readiness endpoint remains `/health`, while metrics use `/metrics`.
 
 The monitoring stack is intentionally outside the DNS
-request path. In Compose, Prometheus scrapes only `dns-server:9091/metrics`
-over a separate `observability` network. The metrics port is not published to
+request path. In Compose, Prometheus scrapes `dns-server:9091/metrics`
+over `observability` and the authenticated Admin fleet aggregate over the
+separate `admin-observability` network. The DNS metrics port is not published to
 the host; the listener is reachable by trusted containers on any network
 attached to DNS, including its egress and policy-distribution networks. Those
 networks must therefore remain tightly scoped. Prometheus and Grafana UIs are
@@ -93,9 +94,10 @@ Prometheus evaluates versioned alert rules. No Alertmanager or notification
 receiver is included yet, so monitoring failure cannot delay DNS traffic and
 alerts remain local to the Prometheus UI.
 
-The Admin API is deliberately not a metrics scrape target. Its security model
-permits anonymous health only; adding a scrape endpoint would require a
-least-privilege credential rather than making management metrics public.
+The Admin API's only anonymous operational endpoint remains health. Its
+curated fleet scrape requires `FLEET_METRICS_READER` or `ADMIN`; Prometheus
+uses the dedicated reader and receives no management, policy, or resolver-agent
+authority.
 
 `admin-api` is a separate Spring Boot management-plane module. It depends on
 `dns-core`, while `dns-core` depends on neither process. `dns-server` polls one
@@ -151,15 +153,19 @@ a secret-free deployment bundle whose
 application image references come directly from the verified release receipt;
 the staging host cannot rebuild source or select a mutable alias.
 
-Private staging uses four networks. `dns-egress` is the DNS server's only
+Private staging uses five networks. `dns-egress` is the DNS server's only
 non-internal network and permits recursive upstream traffic. The internal
 `control-plane` contains Admin API and PostgreSQL, while the internal
 `observability` network contains DNS server, Prometheus, and Grafana. The
-internal `policy-distribution` network contains only DNS and Admin API;
-PostgreSQL cannot join it. UDP and TCP DNS share an explicit loopback/RFC1918 host address and port. Admin API,
+internal `policy-distribution` network contains only DNS and Admin API. The
+internal `admin-observability` network contains only Admin API and Prometheus;
+PostgreSQL cannot join either. UDP and TCP DNS share an explicit loopback/RFC1918 host address and port. Admin API,
 Prometheus, and Grafana map to host loopback; PostgreSQL, DNS health, and DNS
-metrics have no host publication. Host-owned secret files are granted to only
-the relevant containers and never enter the deterministic deployment bundle.
+metrics have no host publication. File-backed secret sources use exact `0444`
+modes inside an owner-only `0700` host directory so non-root services can read
+their individual bind mounts without exposing the source paths to other host
+users. They are granted only to relevant containers and never enter the
+deterministic deployment bundle.
 
 ```mermaid
 flowchart LR
@@ -173,6 +179,7 @@ flowchart LR
     admin -->|"internal control-plane"| postgres["PostgreSQL"]
     dns -->|"authenticated snapshot poll"| admin
     prometheus -->|"internal metrics scrape"| dns
+    prometheus -->|"authenticated fleet scrape"| admin
     grafana -->|"internal datasource"| prometheus
 ```
 
@@ -199,9 +206,9 @@ holds the global publication revision. A successful mutation advances that
 revision in the same transaction; snapshot reads take the same lock before
 loading enabled rules. Stored publication time and deterministic rule ordering
 make each revision a stable representation with a strong ETag. The
-`GET /api/v1/internal/policy-snapshot` route accepts only
-`POLICY_SNAPSHOT_READER` and `ADMIN`; the reader role has no management-plane
-permissions. See
+`GET /api/v1/internal/policy-snapshot` route accepts
+`POLICY_SNAPSHOT_READER`, the resolver-bound `RESOLVER_AGENT`, and `ADMIN`.
+Neither machine role has management-plane permissions. See
 [ADR 0015](adr/0015-transactional-policy-snapshot-publication.md).
 
 The DNS process polls that endpoint on a single background thread. `REQUIRED`
@@ -229,18 +236,51 @@ attempt, last valid `200`/`304`, and consecutive failures. Required startup is
 fail-closed; after a successful load, a control-plane failure is fail-static
 and appears as `DEGRADED` or `STALE` without taking DNS readiness down. Metrics
 avoid labels for names, clients, revisions, endpoints, tokens, or exceptions.
-The Admin API reports `DATA_PLANE_UNOBSERVED` because it has no resolver
-acknowledgement channel. See
-[ADR 0018](adr/0018-observe-policy-runtime-state.md).
+The DNS process reports its active policy state through a boot-scoped,
+server-fenced background session. It holds one immutable report payload across
+ambiguous retries, rereads its file-mounted resolver-agent token for rotation,
+and never performs reporting work on a query thread. Reporting failure is
+observable but does not change DNS readiness or last-known-good enforcement.
+The Admin API computes aggregate convergence from enabled registrations and
+server-received current-session reports. A non-empty expected fleet converges
+only when every member is fresh, required, ready, loaded, and reports the exact
+published revision and enabled-rule count. DNS readiness remains independent
+of that management-plane aggregate. See
+[ADR 0018](adr/0018-observe-policy-runtime-state.md) and
+[ADR 0029](adr/0029-compute-resolver-fleet-policy-convergence.md).
 
-Both Compose topologies run DNS in `REQUIRED` mode with a dedicated
-`POLICY_SNAPSHOT_READER` token mounted into no other service. Bootstrap starts
-PostgreSQL and the Admin API first, creates or validates the reader identity,
-writes a verified token atomically without a trailing newline, and then starts
-DNS. Plain HTTP is allowed only on the isolated policy-distribution network and
-requires an explicit opt-in. The token never enters a deployment bundle,
+Both Compose topologies run DNS in `REQUIRED` mode with separate
+`POLICY_SNAPSHOT_READER` and resolver-agent tokens mounted only into DNS, plus
+a fleet-metrics token mounted only into Prometheus. Bootstrap starts PostgreSQL
+and the Admin API first, creates or validates all three machine identities,
+writes verified tokens atomically without a trailing newline, and then starts
+the full stack. Plain HTTP is allowed only on internal networks and requires an
+explicit opt-in for DNS clients. No token enters a deployment bundle,
 environment variable, resolved Compose file, or application log. See
 [ADR 0019](adr/0019-secure-policy-distribution-deployment.md).
+
+`dns-core` defines the version-one values for resolver
+acknowledgements: an identity-free session request, a server-issued resolver
+identity/session lease, and an ordered policy runtime report. The server clock,
+not a client timestamp, will establish receipt freshness. Session generation
+and sequence fence restarted or replayed processes, and the runtime state
+matrix distinguishes an unloaded initial state from a valid loaded revision
+zero. The Admin API receive side binds one `RESOLVER_AGENT` principal to each
+registered resolver, persists session history and the latest report, and uses
+database row locks for restart fencing and idempotent sequence acceptance. The
+DNS service sends those reports automatically. The control plane evaluates
+them against an explicit server-clock freshness threshold and its locked policy
+publication target. Enabled registrations are the expected fleet; disabled
+registrations are retained as excluded diagnostics. A minimal permanent boot
+ledger preserves restart fencing independently of the detailed session rows;
+bounded cleanup removes only superseded detail older than its retention cutoff.
+See
+[ADR 0026](adr/0026-resolver-identity-and-policy-acknowledgement.md).
+See also [ADR 0027](adr/0027-persist-authenticated-resolver-reports.md).
+See also [ADR 0028](adr/0028-background-resolver-runtime-reporting.md).
+See also [ADR 0029](adr/0029-compute-resolver-fleet-policy-convergence.md).
+See also [ADR 0030](adr/0030-authenticated-fleet-prometheus-metrics.md).
+See also [ADR 0031](adr/0031-retain-resolver-boot-fences.md).
 
 The admin service binds to loopback by default. If deployed beyond localhost,
 TLS termination, network allow-lists, private database access, and ingress-side

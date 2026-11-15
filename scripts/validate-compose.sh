@@ -22,6 +22,8 @@ STAGING_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/dns-staging-validation.XXXXXX")"
 STAGING_ENV_FILE="${STAGING_FIXTURE}/staging.env"
 STAGING_SECRETS_DIR="${STAGING_FIXTURE}/secrets"
 LOCAL_POLICY_TOKEN_FILE="${STAGING_FIXTURE}/local-policy-snapshot-reader-token"
+LOCAL_RESOLVER_AGENT_TOKEN_FILE="${STAGING_FIXTURE}/local-resolver-agent-token"
+LOCAL_FLEET_METRICS_TOKEN_FILE="${STAGING_FIXTURE}/local-fleet-metrics-reader-token"
 
 cleanup() {
     rm -f "${ENV_FILE}"
@@ -58,15 +60,31 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     DNS_POLICY_REQUEST_TIMEOUT_MILLIS DNS_POLICY_REFRESH_INTERVAL_MILLIS \
     DNS_POLICY_INITIAL_BACKOFF_MILLIS DNS_POLICY_MAX_BACKOFF_MILLIS \
     DNS_POLICY_MAX_RESPONSE_BYTES DNS_POLICY_MAX_RULES \
+    DNS_RESOLVER_AGENT_TOKEN_FILE DNS_REPORTING_CONNECT_TIMEOUT_MILLIS \
+    DNS_REPORTING_REQUEST_TIMEOUT_MILLIS DNS_REPORTING_INTERVAL_MILLIS \
+    DNS_REPORTING_INITIAL_BACKOFF_MILLIS DNS_REPORTING_MAX_BACKOFF_MILLIS \
+    DNS_REPORTING_MAX_RESPONSE_BYTES DNS_FLEET_METRICS_READER_TOKEN_FILE \
     GRAFANA_PORT GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD DNS_ADMIN_PORT \
     DNS_ADMIN_DB_NAME DNS_ADMIN_DB_USERNAME DNS_ADMIN_DB_PASSWORD \
-    DNS_ADMIN_DB_POOL_SIZE DNS_ADMIN_BOOTSTRAP_USERNAME \
+    DNS_ADMIN_DB_POOL_SIZE DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED \
+    DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN \
+    DNS_ADMIN_BOOTSTRAP_USERNAME \
     DNS_ADMIN_BOOTSTRAP_TOKEN
 
 BOOTSTRAP_TOKEN="ci-bootstrap-token-${RUN_SUFFIX}-0123456789abcdef0123456789abcdef"
 printf '%s' 'ci-policy-reader-token-0123456789abcdef0123456789abcdef' \
     >"${LOCAL_POLICY_TOKEN_FILE}"
 chmod 600 "${LOCAL_POLICY_TOKEN_FILE}"
+printf '%s' 'ci-resolver-agent-token-0123456789abcdef0123456789abcdef' \
+    >"${LOCAL_RESOLVER_AGENT_TOKEN_FILE}"
+chmod 600 "${LOCAL_RESOLVER_AGENT_TOKEN_FILE}"
+printf '%s' 'ci-fleet-metrics-token-0123456789abcdef0123456789abcdef' \
+    >"${LOCAL_FLEET_METRICS_TOKEN_FILE}"
+chmod 0444 "${LOCAL_FLEET_METRICS_TOKEN_FILE}"
 
 {
     printf '%s\n' 'DNS_PORT=15354'
@@ -94,6 +112,14 @@ chmod 600 "${LOCAL_POLICY_TOKEN_FILE}"
     printf '%s\n' 'DNS_POLICY_MAX_BACKOFF_MILLIS=30000'
     printf '%s\n' 'DNS_POLICY_MAX_RESPONSE_BYTES=1048576'
     printf '%s\n' 'DNS_POLICY_MAX_RULES=10000'
+    printf '%s\n' "DNS_RESOLVER_AGENT_TOKEN_FILE=${LOCAL_RESOLVER_AGENT_TOKEN_FILE}"
+    printf '%s\n' 'DNS_REPORTING_CONNECT_TIMEOUT_MILLIS=2000'
+    printf '%s\n' 'DNS_REPORTING_REQUEST_TIMEOUT_MILLIS=5000'
+    printf '%s\n' 'DNS_REPORTING_INTERVAL_MILLIS=30000'
+    printf '%s\n' 'DNS_REPORTING_INITIAL_BACKOFF_MILLIS=1000'
+    printf '%s\n' 'DNS_REPORTING_MAX_BACKOFF_MILLIS=30000'
+    printf '%s\n' 'DNS_REPORTING_MAX_RESPONSE_BYTES=16384'
+    printf '%s\n' "DNS_FLEET_METRICS_READER_TOKEN_FILE=${LOCAL_FLEET_METRICS_TOKEN_FILE}"
     printf '%s\n' 'PROMETHEUS_PORT=19090'
     printf '%s\n' 'PROMETHEUS_RETENTION_TIME=1h'
     printf '%s\n' 'GRAFANA_PORT=13000'
@@ -104,6 +130,12 @@ chmod 600 "${LOCAL_POLICY_TOKEN_FILE}"
     printf '%s\n' 'DNS_ADMIN_DB_USERNAME=dns_ci'
     printf '%s\n' "DNS_ADMIN_DB_PASSWORD=ci-postgres-password-${RUN_SUFFIX}"
     printf '%s\n' 'DNS_ADMIN_DB_POOL_SIZE=5'
+    printf '%s\n' 'DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS=120000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED=true'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS=2592000000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS=3600000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE=500'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN=10'
     printf '%s\n' 'DNS_ADMIN_BOOTSTRAP_USERNAME=ci-bootstrap'
     printf '%s\n' "DNS_ADMIN_BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN}"
 } >"${ENV_FILE}"
@@ -141,6 +173,10 @@ expected_policy = {
     ),
     "DNS_POLICY_TOKEN_FILE": "/run/secrets/policy-snapshot-reader-token",
     "DNS_POLICY_ALLOW_INSECURE_HTTP": "true",
+    "DNS_REPORTING_MODE": "ENABLED",
+    "DNS_REPORTING_CONTROL_PLANE_URL": "http://admin-api:8081",
+    "DNS_REPORTING_TOKEN_FILE": "/run/secrets/resolver-agent-token",
+    "DNS_REPORTING_ALLOW_INSECURE_HTTP": "true",
 }
 for name, value in expected_policy.items():
     if environment.get(name) != value:
@@ -155,6 +191,32 @@ attached = {
 }
 if attached != {"admin-api", "dns-server"}:
     raise SystemExit("only admin-api and dns-server may join policy-distribution")
+if networks.get("admin-observability", {}).get("internal") is not True:
+    raise SystemExit("local admin-observability network must be internal")
+admin_observability_attached = {
+    name
+    for name, service in services.items()
+    if "admin-observability" in service.get("networks", {})
+}
+if admin_observability_attached != {"admin-api", "prometheus"}:
+    raise SystemExit("only admin-api and prometheus may join admin-observability")
+if services["admin-api"].get("environment", {}).get(
+    "DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS"
+) != "120000":
+    raise SystemExit("local Admin API fleet freshness setting differs")
+expected_retention = {
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED": "true",
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS": "2592000000",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS": "3600000",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE": "500",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN": "10",
+}
+admin_environment = services["admin-api"].get("environment", {})
+for name, value in expected_retention.items():
+    if admin_environment.get(name) != value:
+        raise SystemExit(f"local Admin API session-retention setting differs: {name}")
+if dns.get("networks", {}).get("dns-network", {}).get("gw_priority") != 1:
+    raise SystemExit("local DNS egress network must be its default gateway")
 mounted = dns.get("secrets", [])
 if not any(
     item.get("source") == "policy-snapshot-reader-token"
@@ -162,11 +224,29 @@ if not any(
     for item in mounted
 ):
     raise SystemExit("local DNS policy reader token must be file-mounted")
+if not any(
+    item.get("source") == "resolver-agent-token"
+    and item.get("target") == "resolver-agent-token"
+    for item in mounted
+):
+    raise SystemExit("local resolver agent token must be file-mounted")
+metrics_secret_consumers = {
+    name
+    for name, service in services.items()
+    if any(
+        item.get("source") == "fleet-metrics-reader-token"
+        and item.get("target") == "fleet-metrics-reader-token"
+        for item in service.get("secrets", [])
+    )
+}
+if metrics_secret_consumers != {"prometheus"}:
+    raise SystemExit("only local Prometheus may mount the fleet metrics token")
 PY
 
 docker run --rm \
     --mount "type=bind,src=${REPO_ROOT}/observability/prometheus/prometheus.yml,dst=/etc/prometheus/prometheus.yml,readonly" \
     --mount "type=bind,src=${REPO_ROOT}/observability/prometheus/rules,dst=/etc/prometheus/rules,readonly" \
+    --mount "type=bind,src=${LOCAL_FLEET_METRICS_TOKEN_FILE},dst=/run/secrets/fleet-metrics-reader-token,readonly" \
     --entrypoint /bin/promtool \
     "${PROMETHEUS_IMAGE}" \
     check config /etc/prometheus/prometheus.yml
@@ -190,10 +270,15 @@ python3 -m json.tool "${IMAGE_SBOM_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${RELEASE_ASSETS_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${STAGING_DEPLOYMENT_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${STAGING_BACKUP_SCHEMA_FILE}" >/dev/null
+python3 "${REPO_ROOT}/scripts/resolver-fleet-e2e.py" --help >/dev/null
+python3 "${REPO_ROOT}/scripts/provision-resolver-agent.py" --help >/dev/null
+python3 "${REPO_ROOT}/scripts/provision-fleet-metrics-reader.py" --help >/dev/null
 python3 "${REPO_ROOT}/scripts/normalize-spdx-sbom.py" --self-test
 python3 "${REPO_ROOT}/scripts/test-publish-github-release.py"
 python3 "${REPO_ROOT}/scripts/test-staging-smoke.py"
 python3 "${REPO_ROOT}/scripts/test-provision-policy-reader.py"
+python3 "${REPO_ROOT}/scripts/test-provision-resolver-agent.py"
+python3 "${REPO_ROOT}/scripts/test-provision-fleet-metrics-reader.py"
 python3 "${REPO_ROOT}/scripts/test-staging-deployment-bundle.py"
 python3 "${REPO_ROOT}/scripts/test-staging-backup-evidence.py"
 
@@ -234,7 +319,11 @@ printf '%s\n' 'ci-bootstrap-token-0123456789abcdef0123456789abcdef' \
     >"${STAGING_SECRETS_DIR}/admin-bootstrap-token"
 printf '%s' 'ci-policy-reader-token-0123456789abcdef0123456789abcdef' \
     >"${STAGING_SECRETS_DIR}/policy-snapshot-reader-token"
-chmod 600 "${STAGING_SECRETS_DIR}"/*
+printf '%s' 'ci-resolver-agent-token-0123456789abcdef0123456789abcdef' \
+    >"${STAGING_SECRETS_DIR}/resolver-agent-token"
+printf '%s' 'ci-fleet-metrics-token-0123456789abcdef0123456789abcdef' \
+    >"${STAGING_SECRETS_DIR}/fleet-metrics-reader-token"
+chmod 0444 "${STAGING_SECRETS_DIR}"/*
 
 {
     printf '%s\n' 'STAGING_DNS_BIND_ADDRESS=127.0.0.1'
@@ -246,7 +335,14 @@ chmod 600 "${STAGING_SECRETS_DIR}"/*
     printf '%s\n' 'STAGING_BOOTSTRAP_USERNAME=ci-bootstrap'
     printf '%s\n' 'DNS_ADMIN_DB_NAME=dns_ci'
     printf '%s\n' 'DNS_ADMIN_DB_USERNAME=dns_ci'
+    printf '%s\n' 'DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS=120000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED=true'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS=2592000000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS=3600000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE=500'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN=10'
     printf '%s\n' 'GRAFANA_ADMIN_USER=ci-admin'
+    printf '%s\n' 'STAGING_RESOLVER_ID=staging-dns-1'
 } >"${STAGING_ENV_FILE}"
 chmod 600 "${STAGING_ENV_FILE}"
 
@@ -314,7 +410,12 @@ if dns_contracts != {("udp", "25354", 5354), ("tcp", "25354", 5354)}:
     raise SystemExit("staging DNS must publish TCP and UDP on one private port")
 
 networks = model.get("networks", {})
-for name in ("control-plane", "observability", "policy-distribution"):
+for name in (
+    "control-plane",
+    "observability",
+    "policy-distribution",
+    "admin-observability",
+):
     if networks.get(name, {}).get("internal") is not True:
         raise SystemExit(f"staging network {name} must be internal")
 if networks.get("dns-egress", {}).get("internal") is True:
@@ -327,6 +428,17 @@ policy_attached = {
 }
 if policy_attached != {"admin-api", "dns-server"}:
     raise SystemExit("staging policy network membership differs")
+admin_observability_attached = {
+    name
+    for name, service in services.items()
+    if "admin-observability" in service.get("networks", {})
+}
+if admin_observability_attached != {"admin-api", "prometheus"}:
+    raise SystemExit("staging admin-observability membership differs")
+if services["dns-server"].get("networks", {}).get("dns-egress", {}).get(
+    "gw_priority"
+) != 1:
+    raise SystemExit("staging DNS egress network must be its default gateway")
 dns_environment = services["dns-server"].get("environment", {})
 if dns_environment.get("DNS_POLICY_MODE") != "REQUIRED":
     raise SystemExit("staging DNS policy mode must be REQUIRED")
@@ -338,12 +450,56 @@ if dns_environment.get("DNS_POLICY_TOKEN_FILE") != (
     "/run/secrets/policy-snapshot-reader-token"
 ):
     raise SystemExit("staging policy token path differs")
+if dns_environment.get("DNS_REPORTING_MODE") != "ENABLED":
+    raise SystemExit("staging resolver reporting mode must be ENABLED")
+if dns_environment.get("DNS_REPORTING_CONTROL_PLANE_URL") != (
+    "http://admin-api:8081"
+):
+    raise SystemExit("staging resolver reporting URL differs")
+if dns_environment.get("DNS_REPORTING_TOKEN_FILE") != (
+    "/run/secrets/resolver-agent-token"
+):
+    raise SystemExit("staging resolver reporting token path differs")
+if services["admin-api"].get("environment", {}).get(
+    "DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS"
+) != "120000":
+    raise SystemExit("staging Admin API fleet freshness setting differs")
+expected_retention = {
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED": "true",
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS": "2592000000",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS": "3600000",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE": "500",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN": "10",
+}
+admin_environment = services["admin-api"].get("environment", {})
+for name, value in expected_retention.items():
+    if admin_environment.get(name) != value:
+        raise SystemExit(
+            f"staging Admin API session-retention setting differs: {name}"
+        )
 if not any(
     item.get("source") == "policy-snapshot-reader-token"
     and item.get("target") == "policy-snapshot-reader-token"
     for item in services["dns-server"].get("secrets", [])
 ):
     raise SystemExit("staging policy token must be mounted only as a file")
+if not any(
+    item.get("source") == "resolver-agent-token"
+    and item.get("target") == "resolver-agent-token"
+    for item in services["dns-server"].get("secrets", [])
+):
+    raise SystemExit("staging resolver agent token must be mounted only as a file")
+metrics_secret_consumers = {
+    name
+    for name, service in services.items()
+    if any(
+        item.get("source") == "fleet-metrics-reader-token"
+        and item.get("target") == "fleet-metrics-reader-token"
+        for item in service.get("secrets", [])
+    )
+}
+if metrics_secret_consumers != {"prometheus"}:
+    raise SystemExit("only staging Prometheus may mount the fleet metrics token")
 PY
 
 printf '%s\n' 'Compose, observability, and release-tooling validation passed.'

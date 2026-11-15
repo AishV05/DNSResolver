@@ -75,6 +75,8 @@ crash-*
 config/*.env*
 !config/*.env.example
 config/policy-snapshot-reader-token
+config/resolver-agent-token
+config/runtime-secrets/
 
 # Local embedded database files
 data/

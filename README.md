@@ -118,15 +118,21 @@ unlisted routes, including unlisted actuator routes, are denied.
 
 | Role | Access |
 | --- | --- |
-| `VIEWER` | Read management status and policy records |
+| `VIEWER` | Read management, resolver-fleet status, and policy records |
 | `POLICY_EDITOR` | `VIEWER` access plus policy create, update, and delete |
 | `POLICY_SNAPSHOT_READER` | Read only the internal versioned policy snapshot |
+| `RESOLVER_AGENT` | Read policy snapshots and start/submit reports for exactly one registered resolver |
 | `ADMIN` | All `POLICY_EDITOR` access plus administrator and token management |
 
 | Route | Required access |
 | --- | --- |
 | `GET /api/v1/admin/auth/me` | `VIEWER`, `POLICY_EDITOR`, or `ADMIN` |
-| `GET /api/v1/internal/policy-snapshot` | `POLICY_SNAPSHOT_READER` or `ADMIN` |
+| `GET /api/v1/internal/policy-snapshot` | `POLICY_SNAPSHOT_READER`, `RESOLVER_AGENT`, or `ADMIN` |
+| `POST /api/v1/internal/resolver/session`, `PUT /api/v1/internal/resolver/report` | `RESOLVER_AGENT` |
+| `GET /api/v1/admin/resolvers`, `GET /api/v1/admin/resolvers/{id}` | `VIEWER`, `POLICY_EDITOR`, or `ADMIN` |
+| `GET /api/v1/admin/fleet` | `VIEWER`, `POLICY_EDITOR`, or `ADMIN` |
+| `POST /api/v1/admin/resolvers` | `ADMIN` |
+| `PUT /api/v1/admin/resolvers/{id}` | `ADMIN` |
 | `GET /api/v1/admin/users`, `POST /api/v1/admin/users` | `ADMIN` |
 | `GET /api/v1/admin/users/{id}/tokens`, `POST /api/v1/admin/users/{id}/tokens` | `ADMIN` |
 | `DELETE /api/v1/admin/tokens/{id}` | `ADMIN` |
@@ -164,15 +170,20 @@ curl -H "Authorization: Bearer $DNS_ADMIN_TOKEN" \
   http://127.0.0.1:8081/api/v1/admin/policies
 ```
 
-The status endpoint reports `policyEnforcement` as
-`DATA_PLANE_UNOBSERVED`. The Admin API publishes revisions but receives no
-acknowledgement from DNS instances, so it cannot claim that a particular
-revision is enforced. A DNS server in `REQUIRED` mode enforces its active
-snapshot without placing the Admin API or database on the query path. The
-checked-in local and staging Compose deployments use `REQUIRED` mode, a
-dedicated internal policy-distribution network, and a file-mounted
-least-privilege reader token. A standalone JAR keeps the safer development
-default of `DISABLED` unless those settings are supplied explicitly.
+The status endpoint now derives `policyEnforcement` from authenticated,
+fresh runtime reports. An empty enabled fleet is `DATA_PLANE_UNOBSERVED`; a
+non-empty fleet is `DATA_PLANE_CONVERGED` only when every enabled registration
+has a fresh current-session report in required mode, ready with the exact
+published revision and enabled-rule count. Otherwise it is
+`DATA_PLANE_NOT_CONVERGED`. `GET /api/v1/admin/fleet` exposes the non-secret
+per-member reason and aggregate counts with `Cache-Control: no-store`. This is
+authenticated self-report convergence, not independent proof of every DNS
+decision. A DNS server in `REQUIRED` mode enforces its active snapshot without
+placing the Admin API or database on the query path. The checked-in local and
+staging Compose deployments use `REQUIRED` mode, a dedicated internal
+policy-distribution network, and separate file-mounted reader and resolver-agent
+credentials. A standalone JAR keeps policy synchronization and fleet reporting
+disabled unless those settings are supplied explicitly.
 
 Policy evaluation lives in `dns-core` and uses immutable snapshots,
 label-aware exact/subdomain matching, and the `DnsResolver` abstraction. See
@@ -240,8 +251,8 @@ are rejected before policy or recursion, preventing ambiguous-query bypasses.
 
 `DISABLED` mode remains transparent. `REQUIRED` mode still returns `SERVFAIL`
 until its first snapshot, then continues enforcing the last-known-good
-snapshot during later synchronization failures. The Admin API cannot observe
-which revision a DNS instance currently holds. See
+snapshot during later synchronization failures. The query path remains
+independent of the reporting channel described below. See
 [ADR 0017](docs/adr/0017-enforce-active-policy-snapshots.md).
 
 Policy telemetry keeps that readiness contract intact. `/health` distinguishes
@@ -258,15 +269,74 @@ client address, token, endpoint, response body, or arbitrary error. See
 Local Compose and private staging enable the complete policy path. Only
 `admin-api` and `dns-server` join the internal `policy-distribution` network;
 PostgreSQL remains isolated on `control-plane`. The DNS server receives a
-newline-free `POLICY_SNAPSHOT_READER` token through a file mount and starts in
-fail-closed `REQUIRED` mode. First-start deployment brings up PostgreSQL and
-the Admin API, provisions and verifies the least-privilege reader, and only
-then starts DNS. Deterministic acceptance tests prove live rule activation over
-UDP and TCP, last-known-good enforcement during an Admin API outage or invalid
-credential, recovery, and rule disable/delete. The Admin API still reports
-`DATA_PLANE_UNOBSERVED` because this polling design has no per-resolver
-acknowledgement channel. See
+newline-free `POLICY_SNAPSHOT_READER` token and a distinct resolver-agent token
+through separate file mounts and starts in fail-closed `REQUIRED` mode.
+First-start deployment brings up PostgreSQL and the Admin API, provisions and
+verifies both least-privilege identities, and only then starts DNS.
+Deterministic acceptance tests prove live rule activation over UDP and TCP,
+last-known-good enforcement during an Admin API outage or invalid credential,
+recovery, rule disable/delete, and automatic runtime-report persistence. See
 [ADR 0019](docs/adr/0019-secure-policy-distribution-deployment.md).
+
+Week 19A defines the framework-free identity, session, ordering, and policy
+runtime message contracts used by the acknowledgement channel. A
+resolver cannot choose its identity in a report: the control plane will bind a
+registered identity to an authenticated session and issue the session UUID and
+generation. Reports carry a process boot UUID and monotonic sequence but no
+client timestamp, domain, endpoint, token, or error text. The strict JSON
+schemas live under `contracts/` and are checked by
+`./scripts/validate-resolver-runtime-contracts.sh`. See
+[ADR 0026](docs/adr/0026-resolver-identity-and-policy-acknowledgement.md).
+
+Week 19B adds the receive side. An administrator registers a canonical resolver
+ID through `POST /api/v1/admin/resolvers`; the response returns the first raw
+machine token once and the database stores only its hash. That identity is
+bound one-to-one to the resolver ID and cannot be created through the generic
+user endpoint. The authenticated resolver then starts a durable session and
+submits ordered runtime reports. Registration-row locks serialize concurrent
+boots and reports, server-issued generations fence old processes, and an exact
+same-sequence retry does not refresh the server receipt timestamp. Unknown,
+duplicate, missing, trailing, and contradictory JSON input is rejected. See
+[ADR 0027](docs/adr/0027-persist-authenticated-resolver-reports.md).
+
+Week 19C adds the DNS-side reporter. A daemon establishes one boot-scoped
+session, captures coherent policy state outside the query path, and retries an
+immutable `(sequence, payload)` until the Admin API acknowledges it. The
+credential file is reread for rotation, retries use bounded backoff and jitter,
+and a session conflict fences the reporter instead of creating a session
+takeover loop. Reporting degradation never changes DNS readiness or the
+last-known-good policy. Compose and staging provision a stable resolver
+identity and mount its raw token only into DNS. Freshness and whole-fleet
+aggregation are supplied by Week 19D. See
+[ADR 0028](docs/adr/0028-background-resolver-runtime-reporting.md).
+
+Week 19D turns those durable reports into an operator-facing convergence view.
+Enabled registrations define the expected fleet; disabled registrations remain
+visible but are excluded. The Admin API evaluates freshness from its own
+receipt clock and requires the exact published revision and enabled-rule count.
+Policy changes, missing sessions, stale reports, disabled policy mode, and
+unready snapshots have stable member reasons. Disabling a registration fences
+its session and temporarily suspends its machine credentials; re-enabling
+requires a new session and makes non-revoked, unexpired credentials usable
+again. After a suspected credential compromise, revoke or rotate tokens before
+re-enabling. The default freshness threshold is 120 seconds and can be set with
+`DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS`. See
+[ADR 0029](docs/adr/0029-compute-resolver-fleet-policy-convergence.md).
+
+Week 19E exposes that view to Prometheus through a dedicated authenticated,
+fixed-cardinality endpoint. A separate `FLEET_METRICS_READER` credential is
+mounted only into Prometheus over the internal `admin-observability` network;
+it cannot read management JSON or mutate policy. The dashboard and alerts show
+Admin target health, fleet convergence, member-state counts, and publication
+targets. See [ADR 0030](docs/adr/0030-authenticated-fleet-prometheus-metrics.md).
+
+Week 19F separates durable replay protection from prunable session detail.
+Every resolver boot keeps a compact permanent fence, while only superseded
+session/report rows older than the configured cutoff are removed in bounded
+batches. Cleanup cannot delete an active session, and replaying a pruned boot
+still returns a conflict. Aggregate cleanup and backlog signals are included in
+the authenticated fleet metrics. See
+[ADR 0031](docs/adr/0031-retain-resolver-boot-fences.md).
 
 By default, the admin API stores local development data in an H2 file database
 under `./data/dns-admin`; the `data/` directory is ignored by Git and Docker.
@@ -342,6 +412,45 @@ token in an environment variable or command line. The file is reread for each
 poll to permit controlled rotation and must contain exactly one 32–512 byte
 Bearer token with no newline.
 
+Resolver fleet reporting is also disabled for a standalone process unless it
+is explicitly configured:
+
+| System property | Environment variable | Default | Purpose |
+| --- | --- | --- | --- |
+| `dns.reporting.mode` | `DNS_REPORTING_MODE` | `DISABLED` | Enable the background session/report loop |
+| `dns.reporting.controlPlaneUrl` | `DNS_REPORTING_CONTROL_PLANE_URL` | none | Admin API origin; fixed internal paths are appended by the client |
+| `dns.reporting.tokenFile` | `DNS_REPORTING_TOKEN_FILE` | none | Absolute path containing only the raw resolver-agent token |
+| `dns.applicationVersion` | `DNS_APPLICATION_VERSION` | `development` | Bounded application version included in the session/report contract |
+| `dns.reporting.allowInsecureHttp` | `DNS_REPORTING_ALLOW_INSECURE_HTTP` | `false` | Explicitly permit HTTP on a separately trusted internal network |
+| `dns.reporting.connectTimeoutMillis` | `DNS_REPORTING_CONNECT_TIMEOUT_MILLIS` | `2000` | HTTP connection timeout |
+| `dns.reporting.requestTimeoutMillis` | `DNS_REPORTING_REQUEST_TIMEOUT_MILLIS` | `5000` | Complete session/report request timeout |
+| `dns.reporting.reportIntervalMillis` | `DNS_REPORTING_INTERVAL_MILLIS` | `30000` | Delay after an accepted report |
+| `dns.reporting.initialBackoffMillis` | `DNS_REPORTING_INITIAL_BACKOFF_MILLIS` | `1000` | First retry delay before jitter |
+| `dns.reporting.maxBackoffMillis` | `DNS_REPORTING_MAX_BACKOFF_MILLIS` | `30000` | Maximum retry delay |
+| `dns.reporting.maxResponseBytes` | `DNS_REPORTING_MAX_RESPONSE_BYTES` | `16384` | Hard session-response memory limit |
+
+The Admin API evaluates report freshness with
+`dns.admin.fleet.report-freshness-millis` /
+`DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS` (default `120000`, allowed
+`1000`–`14400000`). Deployment preflight requires this value to be at least the
+report request timeout plus three times the larger of the report interval and
+maximum reporting backoff.
+
+Detailed superseded resolver sessions default to 30 days of retention. The
+Admin API uses
+`DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED`,
+`DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS`,
+`DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS`,
+`DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE`, and
+`DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN`; their defaults are
+`true`, `2592000000`, `3600000`, `500`, and `10`. Cleanup removes detailed
+superseded sessions only. The compact boot-fence ledger is permanent so an old
+boot cannot regain a lease after its detail row is pruned.
+
+The reporting token file follows the same regular-file, length, and no-newline
+rules as the policy token and is reread for every HTTP operation. A reporting
+failure changes only reporting telemetry; it does not make DNS unready.
+
 For example:
 
 ```bash
@@ -368,7 +477,8 @@ also exposes per-transport listener and request signals, bounded TCP connection
 signals, a successful-query handling-time sum and count, policy snapshot state,
 sync results/freshness, policy decisions by transport, parser rejections,
 positive/negative cache outcomes and evictions, rejected upstream responses,
-nameserver failover, and rejected CNAME loops. Snapshot publication
+nameserver failover, rejected CNAME loops, and fixed-cardinality resolver fleet
+reporting state/outcomes. Snapshot publication
 age is informational; `dns_policy_sync_last_success_age_seconds` and
 `dns_policy_sync_stale` describe control-plane freshness because a valid `304`
 also refreshes them. It deliberately does **not** expose DNS names, client IP
@@ -403,14 +513,15 @@ The local Docker Compose deployment runs five services:
 | `dns-server` | UDP and TCP `${DNS_PORT:-5354}` | Recursive DNS data plane |
 | `admin-api` | `127.0.0.1:${DNS_ADMIN_PORT:-8081}` | Authenticated management plane |
 | `postgres` | Not published | Durable admin identities, tokens, and policies |
-| `prometheus` | `127.0.0.1:${PROMETHEUS_PORT:-9090}` | Private DNS metrics collection and local alert evaluation |
+| `prometheus` | `127.0.0.1:${PROMETHEUS_PORT:-9090}` | Private DNS and authenticated fleet metrics collection |
 | `grafana` | `127.0.0.1:${GRAFANA_PORT:-3000}` | Provisioned DNS operations dashboard |
 
 The Admin API and PostgreSQL share a dedicated control-plane Docker network;
 PostgreSQL has no host port. Only the Admin API and DNS server share the
 internal `policy-distribution` network. The DNS server also uses its egress
-network for authoritative DNS and `observability` for Prometheus. The Admin API
-is intentionally bound to localhost on the host.
+network for authoritative DNS and `observability` for Prometheus. A separate
+internal `admin-observability` network contains only Prometheus and the Admin
+API. The Admin API is intentionally bound to localhost on the host.
 
 For the DNS image alone, build the non-root image and run it with the DNS port
 published:
@@ -435,8 +546,13 @@ chmod 600 config/local.env
 #   openssl rand -base64 48 | tr '+/' '-_' | tr -d '='
 # - GRAFANA_ADMIN_PASSWORD: a separate strong dashboard password
 
-test -e config/policy-snapshot-reader-token || \
-  install -m 600 /dev/null config/policy-snapshot-reader-token
+install -d -m 700 config/runtime-secrets
+test -e config/runtime-secrets/policy-snapshot-reader-token || \
+  install -m 444 /dev/null config/runtime-secrets/policy-snapshot-reader-token
+test -e config/runtime-secrets/resolver-agent-token || \
+  install -m 444 /dev/null config/runtime-secrets/resolver-agent-token
+test -e config/runtime-secrets/fleet-metrics-reader-token || \
+  install -m 444 /dev/null config/runtime-secrets/fleet-metrics-reader-token
 docker compose --env-file config/local.env \
   up --build -d --wait postgres admin-api
 
@@ -444,22 +560,39 @@ admin_token_file="$(mktemp)"
 chmod 600 "$admin_token_file"
 sed -n 's/^DNS_ADMIN_BOOTSTRAP_TOKEN=//p' config/local.env > "$admin_token_file"
 test -s "$admin_token_file"
+resolver_id="$(sed -n 's/^DNS_RESOLVER_ID=//p' config/local.env)"
+test -n "$resolver_id"
 python3 scripts/provision-policy-reader.py \
   --admin-url http://127.0.0.1:8081 \
   --admin-token-file "$admin_token_file" \
-  --output-file "$(pwd)/config/policy-snapshot-reader-token"
+  --output-file "$(pwd)/config/runtime-secrets/policy-snapshot-reader-token"
+python3 scripts/provision-resolver-agent.py \
+  --admin-url http://127.0.0.1:8081 \
+  --admin-token-file "$admin_token_file" \
+  --resolver-id "$resolver_id" \
+  --output-file "$(pwd)/config/runtime-secrets/resolver-agent-token"
+python3 scripts/provision-fleet-metrics-reader.py \
+  --admin-url http://127.0.0.1:8081 \
+  --admin-token-file "$admin_token_file" \
+  --output-file "$(pwd)/config/runtime-secrets/fleet-metrics-reader-token"
 rm -f "$admin_token_file"
+unset resolver_id
 
 docker compose --env-file config/local.env up --build -d --wait
 docker compose --env-file config/local.env ps
 ```
 
 Do not commit `config/local.env`, paste it into chat, or share the output of a
-fully resolved `docker compose config`: all can expose credentials. Keep its
-owner-only permissions (`chmod 600`) when it contains secrets. Compose waits
+fully resolved `docker compose config`: all can expose credentials. Keep the
+environment file at `0600`. Native Compose file-backed secrets retain their
+host mode, so the non-root DNS process requires each token file to be `0444`;
+the enclosing ignored `config/runtime-secrets` directory is the host-side
+confidentiality boundary and must remain `0700`. Compose waits
 for PostgreSQL before the Admin API, for the Admin API before required-mode DNS,
-and for Prometheus before Grafana. The reader must be provisioned before the
-full-stack command or DNS correctly remains unready.
+and for Prometheus before Grafana. The machine credentials must be provisioned before
+the full-stack command or DNS correctly remains unready. The resolver agent is
+independently required for reporting; losing it degrades reporting telemetry
+without changing DNS readiness.
 
 Verify the running stack from the host:
 
@@ -475,20 +608,20 @@ docker compose --env-file config/local.env logs --tail=100 admin-api
 
 curl -fsS http://127.0.0.1:9090/-/ready
 curl --get -fsS http://127.0.0.1:9090/api/v1/query \
-  --data-urlencode 'query=up{job="dns-server"}'
+  --data-urlencode 'query=up{job=~"dns-server|admin-api"}'
 ```
 
 The DNS and Admin API images both run as non-root users. Their container health
 checks use loopback-only HTTP probes; they do not expose the DNS health endpoint
-or PostgreSQL to the host. Prometheus scrapes the DNS metrics endpoint over the
-`observability` network. DNS polls the Admin API only over the internal
-`policy-distribution` network. Neither Prometheus nor Grafana can reach the
-Admin API or PostgreSQL.
+or PostgreSQL to the host. Prometheus scrapes DNS over `observability` and the
+curated authenticated fleet endpoint over `admin-observability`. DNS polls the
+Admin API only over `policy-distribution`. Grafana cannot reach the Admin API
+or PostgreSQL, and Prometheus cannot reach PostgreSQL.
 
 ## Monitoring
 
 Prometheus is available at `http://127.0.0.1:9090`; its **Targets** page should
-show `dns-server` as `UP`. Grafana is available at
+show both `dns-server` and `admin-api` as `UP`. Grafana is available at
 `http://127.0.0.1:3000`. Sign in with `GRAFANA_ADMIN_USER` (default `admin`)
 and `GRAFANA_ADMIN_PASSWORD` from your ignored `config/local.env`; the
 **DNS Resolver / DNS Resolver Operations** dashboard is provisioned
@@ -501,12 +634,15 @@ recreate the Grafana volume.
 
 The dashboard covers per-transport request traffic, admission drops, resolver
 results, successful query-handling latency, UDP/TCP listener state, policy
-snapshot state, synchronization outcomes, and policy decisions. Prometheus
+snapshot state, synchronization outcomes, policy decisions, resolver fleet
+reporting, and resolver-session retention. Prometheus
 evaluates local alerts for an unreachable DNS metrics target, high resolver
 failures, high admission drops, either DNS transport listener reporting down,
 required policy without an initial snapshot, stale policy synchronization,
-and repeated policy sync failures. There is no Alertmanager or notification
-delivery in the local stack, so alerts are visible in Prometheus only.
+repeated policy sync failures, a fenced reporting session, repeated reporting
+failures, repeated session-cleanup failures, and a sustained retention
+backlog. There is no Alertmanager or notification delivery in the local stack,
+so alerts are visible in Prometheus only.
 
 See [the observability runbook](docs/operations/observability.md) for safe
 verification commands, PromQL queries, alert meanings, and troubleshooting.
@@ -690,18 +826,20 @@ digest.
 
 DNS UDP and TCP share one explicitly configured loopback or RFC1918 host
 address and port. Admin API, Prometheus, and Grafana remain on host loopback;
-PostgreSQL, DNS health, and DNS metrics are not published. Runtime credentials are
-owner-only host files granted to individual services through Compose secrets,
-never workflow artifacts or resolved Compose output.
+PostgreSQL, DNS health, and DNS metrics are not published. Runtime credential
+sources live in an owner-only host directory and are granted to individual
+services through Compose secrets, never workflow artifacts or resolved Compose
+output.
 
 The first deployment uses a bootstrap token file. Normal deployments require a
 separate `admin-operator-token` host file so the post-deploy check proves
 authenticated `ADMIN` access without mounting that credential into a service.
 During bootstrap, deployment starts only PostgreSQL and the Admin API, creates
-and verifies the `POLICY_SNAPSHOT_READER` identity/token, writes the raw token
-as the owner-only newline-free `policy-snapshot-reader-token`, removes the
-bootstrap overlay, and then starts the required-mode DNS server. Only DNS sees
-that reader secret.
+and verifies the `POLICY_SNAPSHOT_READER`, registered resolver-agent, and
+`FLEET_METRICS_READER` identities, writes their raw tokens as separate
+newline-free Compose sources inside that protected directory, removes the
+bootstrap overlay, and then starts the full stack. DNS sees only its two
+credentials; Prometheus sees only the fleet-metrics credential.
 
 Prepare and check a release from its verified immutable assets:
 

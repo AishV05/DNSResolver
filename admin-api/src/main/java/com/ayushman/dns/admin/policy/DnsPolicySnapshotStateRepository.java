@@ -20,4 +20,14 @@ interface DnsPolicySnapshotStateRepository
     Optional<DnsPolicySnapshotStateEntity> findLockedById(
             @Param("singletonId") int singletonId
     );
+
+    @Lock(LockModeType.PESSIMISTIC_READ)
+    @Query("""
+            select state
+            from DnsPolicySnapshotStateEntity state
+            where state.singletonId = :singletonId
+            """)
+    Optional<DnsPolicySnapshotStateEntity> findReadLockedById(
+            @Param("singletonId") int singletonId
+    );
 }

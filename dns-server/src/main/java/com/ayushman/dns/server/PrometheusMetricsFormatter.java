@@ -21,7 +21,8 @@ final class PrometheusMetricsFormatter {
                 serverRunning,
                 serverRunning,
                 snapshot,
-                PolicyTelemetry.Snapshot.disabled()
+                PolicyTelemetry.Snapshot.disabled(),
+                ResolverReportingTelemetry.Snapshot.disabled()
         );
     }
 
@@ -36,7 +37,8 @@ final class PrometheusMetricsFormatter {
                 udpRunning,
                 tcpRunning,
                 snapshot,
-                PolicyTelemetry.Snapshot.disabled()
+                PolicyTelemetry.Snapshot.disabled(),
+                ResolverReportingTelemetry.Snapshot.disabled()
         );
     }
 
@@ -47,8 +49,26 @@ final class PrometheusMetricsFormatter {
             ServerMetrics.Snapshot snapshot,
             PolicyTelemetry.Snapshot policy
     ) {
+        return format(
+                serverRunning,
+                udpRunning,
+                tcpRunning,
+                snapshot,
+                policy,
+                ResolverReportingTelemetry.Snapshot.disabled()
+        );
+    }
 
-        if (snapshot == null || policy == null) {
+    static String format(
+            boolean serverRunning,
+            boolean udpRunning,
+            boolean tcpRunning,
+            ServerMetrics.Snapshot snapshot,
+            PolicyTelemetry.Snapshot policy,
+            ResolverReportingTelemetry.Snapshot reporting
+    ) {
+
+        if (snapshot == null || policy == null || reporting == null) {
             throw new IllegalArgumentException("snapshot must not be null");
         }
 
@@ -103,8 +123,88 @@ final class PrometheusMetricsFormatter {
         appendTcpConnections(output, snapshot);
         appendResolverOperationalMetrics(output, snapshot);
         appendPolicyMetrics(output, policy);
+        appendResolverReportingMetrics(output, reporting);
 
         return output.toString();
+    }
+
+    private static void appendResolverReportingMetrics(
+            StringBuilder output,
+            ResolverReportingTelemetry.Snapshot reporting
+    ) {
+        output.append("# HELP dns_fleet_reporting_mode ")
+                .append("Configured resolver fleet reporting mode.\n")
+                .append("# TYPE dns_fleet_reporting_mode gauge\n");
+        appendLabeledValue(
+                output,
+                "dns_fleet_reporting_mode",
+                "mode",
+                "disabled",
+                reporting.mode() == ResolverReportingMode.DISABLED ? 1 : 0
+        );
+        appendLabeledValue(
+                output,
+                "dns_fleet_reporting_mode",
+                "mode",
+                "enabled",
+                reporting.mode() == ResolverReportingMode.ENABLED ? 1 : 0
+        );
+
+        output.append("# HELP dns_fleet_reporting_state ")
+                .append("Current resolver fleet reporting state.\n")
+                .append("# TYPE dns_fleet_reporting_state gauge\n");
+        for (ResolverReportingTelemetry.State state
+                : ResolverReportingTelemetry.State.values()) {
+            appendLabeledValue(
+                    output,
+                    "dns_fleet_reporting_state",
+                    "state",
+                    state.name().toLowerCase(java.util.Locale.ROOT),
+                    reporting.state() == state ? 1 : 0
+            );
+        }
+        appendCounter(
+                output,
+                "dns_fleet_reporting_attempts_total",
+                "Total resolver fleet HTTP reporting attempts.",
+                reporting.attempts()
+        );
+        appendCounter(
+                output,
+                "dns_fleet_sessions_established_total",
+                "Total resolver fleet sessions established.",
+                reporting.sessionsEstablished()
+        );
+        appendCounter(
+                output,
+                "dns_fleet_reports_accepted_total",
+                "Total resolver runtime reports acknowledged.",
+                reporting.reportsAccepted()
+        );
+        appendCounter(
+                output,
+                "dns_fleet_reporting_failures_total",
+                "Total resolver fleet reporting failures.",
+                reporting.failures()
+        );
+        appendGauge(
+                output,
+                "dns_fleet_reporting_last_attempt_timestamp_seconds",
+                "Unix time of the latest resolver fleet reporting attempt.",
+                reporting.lastAttemptEpochSeconds()
+        );
+        appendGauge(
+                output,
+                "dns_fleet_reporting_last_success_timestamp_seconds",
+                "Unix time of the latest acknowledged fleet operation.",
+                reporting.lastSuccessEpochSeconds()
+        );
+        appendGauge(
+                output,
+                "dns_fleet_reporting_consecutive_failures",
+                "Consecutive resolver fleet reporting failures.",
+                reporting.consecutiveFailures()
+        );
     }
 
     private static void appendPolicyMetrics(

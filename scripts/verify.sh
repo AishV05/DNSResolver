@@ -31,4 +31,6 @@ if [[ -n "${tracked_ignored_files}" ]]; then
     exit 1
 fi
 
+"${REPO_ROOT}/scripts/validate-resolver-runtime-contracts.sh"
+
 ./mvnw -B -ntp verify

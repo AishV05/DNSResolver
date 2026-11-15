@@ -13,6 +13,68 @@ groups:
             least two minutes. Check the DNS container, its metrics listener,
             and the observability network.
 
+      - alert: DnsAdminApiTargetDown
+        expr: up{job="admin-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Admin API fleet metrics target is down
+          description: >-
+            Prometheus has been unable to scrape the authenticated Admin API
+            fleet metrics endpoint for at least two minutes. Check the Admin
+            API, its scrape credential, and the internal observability network.
+
+      - alert: DnsFleetUnobserved
+        expr: dns_admin_fleet_policy_state{state="unobserved"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Resolver fleet has no expected members
+          description: >-
+            No enabled resolver registration has been present in the expected
+            fleet for at least five minutes. Register or re-enable the intended
+            resolver before treating policy convergence as observed.
+
+      - alert: DnsFleetNotConverged
+        expr: dns_admin_fleet_policy_state{state="not_converged"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolver fleet has not converged on published policy
+          description: >-
+            At least one expected resolver has no current fresh report, is not
+            policy-ready, or disagrees with the published revision or enabled
+            rule count. Inspect the fleet member-state counts before changing
+            policy.
+
+      - alert: DnsFleetSessionCleanupFailures
+        expr: dns_admin_fleet_session_cleanup_consecutive_failures >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolver session cleanup is repeatedly failing
+          description: >-
+            At least three consecutive detailed-session cleanup runs have
+            failed for five minutes. Replay fences remain intact, but
+            superseded session history may continue growing. Inspect the
+            Admin API logs and database health.
+
+      - alert: DnsFleetSessionRetentionBacklog
+        expr: dns_admin_fleet_session_cleanup_saturated == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolver session retention backlog is sustained
+          description: >-
+            Retention-eligible resolver sessions have remained after bounded
+            cleanup runs for fifteen minutes. Increase cleanup capacity only
+            after checking database health and session churn.
+
       - alert: DnsUdpListenerDown
         expr: dns_transport_listener_running{transport="udp"} == 0
         for: 2m
@@ -97,6 +159,32 @@ groups:
             At least three policy synchronization attempts failed in the
             trailing five-minute window for five minutes. The active
             last-known-good snapshot, if present, remains in use.
+
+      - alert: DnsFleetReportingFenced
+        expr: dns_fleet_reporting_state{state="fenced"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Resolver fleet reporting session is fenced
+          description: >-
+            The control plane rejected the resolver's active reporting
+            session. DNS serving and last-known-good policy remain available,
+            but this process will not send another runtime report until it is
+            restarted with a valid resolver credential.
+
+      - alert: DnsFleetReportingFailures
+        expr: increase(dns_fleet_reporting_failures_total[5m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolver fleet reporting is repeatedly failing
+          description: >-
+            At least three session or report operations failed in the trailing
+            five-minute window for five minutes. Check control-plane
+            reachability and the resolver-agent credential; DNS readiness is
+            intentionally unaffected.
 
       - alert: DnsUpstreamResponsesRejectedHigh
         expr: increase(dns_upstream_response_rejections_total[5m]) >= 5

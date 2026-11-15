@@ -100,9 +100,10 @@ The bootstrap administrator is a separate first-start operation.
 targeted as `dns.admin.bootstrap.token`. It is used only while initializing an
 empty database. The deployer starts PostgreSQL and the Admin API first, uses
 the bootstrap administrator to create or validate the single-purpose
-`POLICY_SNAPSHOT_READER`, issues and verifies its token, writes that token to
-the owner-only host secret, and then starts required-mode DNS without the
-bootstrap overlay. Once the stack is healthy, the operator creates a distinct,
+`POLICY_SNAPSHOT_READER`, issues and verifies its token, writes that token as a
+Compose source inside the owner-only secret directory, and then starts
+required-mode DNS without the bootstrap overlay. Once the stack is healthy,
+the operator creates a distinct,
 expiring administrator token, saves its one-time raw value as the owner-only
 host `admin-operator-token`, verifies it, revokes the bootstrap token, reapplies
 the normal configuration, and then removes the bootstrap token file.

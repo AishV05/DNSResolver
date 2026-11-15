@@ -36,7 +36,8 @@ First-start orchestration is phased:
 1. start PostgreSQL and the Admin API with the bootstrap overlay;
 2. create or validate the fixed reader identity;
 3. issue a new reader token and prove it can fetch a valid snapshot;
-4. atomically write the raw token with owner-only permissions;
+4. atomically write the raw token as a `0444` Compose source inside an
+   owner-only `0700` secret directory;
 5. revoke prior active tokens with the same machine label only after the new
    token is safely written; and
 6. remove the bootstrap overlay and start the complete required-mode stack.
@@ -73,9 +74,11 @@ transactional policy CRUD to authenticated distribution and low-latency live
 enforcement. Network membership, role scope, secret placement, startup order,
 readiness, metrics, and failure behavior are all machine-validated.
 
-The Admin API still reports `DATA_PLANE_UNOBSERVED`. Polling and Prometheus
-telemetry do not form a durable per-instance acknowledgement registry, so the
-publisher cannot truthfully claim that every resolver has applied a revision.
+At this phase the Admin API still reported `DATA_PLANE_UNOBSERVED`. Polling and
+Prometheus telemetry did not form a durable per-instance acknowledgement
+registry. ADRs 0026-0029 later add a separate authenticated self-report channel
+and convergence view; it still does not claim independent proof of every DNS
+decision.
 The implementation also filters only the requested QNAME; it does not enforce
 policy against names discovered later in a CNAME chain.
 

@@ -54,6 +54,8 @@ staging_resolve_inputs() {
     local config_input=$2
     local bootstrap=${3:-false}
     local require_smoke_credential=${4:-true}
+    local allow_missing_fleet_metrics=${5:-false}
+    local bundle_contract=${6:-current}
 
     [[ -d "${bundle_input}" && ! -L "${bundle_input}" ]] \
         || staging_fail 'bundle must be a regular directory, not a symlink'
@@ -67,9 +69,14 @@ staging_resolve_inputs() {
         || staging_fail 'internal bootstrap selection is invalid'
     [[ "${require_smoke_credential}" == true || "${require_smoke_credential}" == false ]] \
         || staging_fail 'internal smoke-credential selection is invalid'
+    [[ "${allow_missing_fleet_metrics}" == true || "${allow_missing_fleet_metrics}" == false ]] \
+        || staging_fail 'internal fleet-metrics initialization selection is invalid'
+    [[ "${bundle_contract}" == current || "${bundle_contract}" == pre-fleet-metrics ]] \
+        || staging_fail 'internal staging bundle contract is invalid'
 
     "${STAGING_SCRIPT_DIR}/verify-staging-deployment-bundle.sh" \
-        "${STAGING_BUNDLE_DIR}"
+        "${STAGING_BUNDLE_DIR}" \
+        --contract "${bundle_contract}"
 
     local values_file
     values_file="$(mktemp "${TMPDIR:-/tmp}/dns-staging-config.XXXXXX")"
@@ -77,7 +84,8 @@ staging_resolve_inputs() {
     if ! python3 - \
             "${STAGING_CONFIG_FILE}" \
             "${STAGING_USE_BOOTSTRAP}" \
-            "${require_smoke_credential}" >"${values_file}" <<'PY'
+            "${require_smoke_credential}" \
+            "${allow_missing_fleet_metrics}" >"${values_file}" <<'PY'
 from __future__ import annotations
 
 import ipaddress
@@ -91,6 +99,7 @@ import sys
 path = Path(sys.argv[1])
 bootstrap = sys.argv[2] == "true"
 require_smoke_credential = sys.argv[3] == "true"
+allow_missing_fleet_metrics = sys.argv[4] == "true"
 
 
 def fail(message: str) -> None:
@@ -107,6 +116,7 @@ allowed = {
     "STAGING_STATE_DIR",
     "STAGING_BACKUP_DIR",
     "STAGING_BOOTSTRAP_USERNAME",
+    "STAGING_RESOLVER_ID",
     "DNS_WORKER_THREADS",
     "DNS_WORKER_QUEUE_CAPACITY",
     "DNS_MAX_REQUEST_BYTES",
@@ -133,9 +143,21 @@ allowed = {
     "DNS_POLICY_MAX_BACKOFF_MILLIS",
     "DNS_POLICY_MAX_RESPONSE_BYTES",
     "DNS_POLICY_MAX_RULES",
+    "DNS_REPORTING_CONNECT_TIMEOUT_MILLIS",
+    "DNS_REPORTING_REQUEST_TIMEOUT_MILLIS",
+    "DNS_REPORTING_INTERVAL_MILLIS",
+    "DNS_REPORTING_INITIAL_BACKOFF_MILLIS",
+    "DNS_REPORTING_MAX_BACKOFF_MILLIS",
+    "DNS_REPORTING_MAX_RESPONSE_BYTES",
     "DNS_ADMIN_DB_NAME",
     "DNS_ADMIN_DB_USERNAME",
     "DNS_ADMIN_DB_POOL_SIZE",
+    "DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS",
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED",
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE",
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN",
     "PROMETHEUS_RETENTION_TIME",
     "GRAFANA_ADMIN_USER",
 }
@@ -268,7 +290,78 @@ if policy_initial_backoff > policy_max_backoff:
     )
 integer("DNS_POLICY_MAX_RESPONSE_BYTES", 1048576, 256, 16777216)
 integer("DNS_POLICY_MAX_RULES", 10000, 1, 100000)
+reporting_connect_timeout = integer(
+    "DNS_REPORTING_CONNECT_TIMEOUT_MILLIS", 2000, 100, 60000
+)
+reporting_request_timeout = integer(
+    "DNS_REPORTING_REQUEST_TIMEOUT_MILLIS", 5000, 100, 120000
+)
+if reporting_request_timeout < reporting_connect_timeout:
+    fail(
+        "DNS_REPORTING_REQUEST_TIMEOUT_MILLIS must not be less than "
+        "DNS_REPORTING_CONNECT_TIMEOUT_MILLIS"
+    )
+reporting_interval = integer(
+    "DNS_REPORTING_INTERVAL_MILLIS", 30000, 100, 3600000
+)
+reporting_initial_backoff = integer(
+    "DNS_REPORTING_INITIAL_BACKOFF_MILLIS", 1000, 100, 3600000
+)
+reporting_max_backoff = integer(
+    "DNS_REPORTING_MAX_BACKOFF_MILLIS", 30000, 100, 3600000
+)
+if reporting_initial_backoff > reporting_max_backoff:
+    fail(
+        "DNS_REPORTING_INITIAL_BACKOFF_MILLIS must not exceed "
+        "DNS_REPORTING_MAX_BACKOFF_MILLIS"
+    )
+integer("DNS_REPORTING_MAX_RESPONSE_BYTES", 16384, 256, 1048576)
+resolver_id = values.get("STAGING_RESOLVER_ID", "staging-dns-1")
+if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", resolver_id) is None:
+    fail("STAGING_RESOLVER_ID must be a canonical lowercase DNS label")
+values["STAGING_RESOLVER_ID"] = resolver_id
 integer("DNS_ADMIN_DB_POOL_SIZE", 5, 1, 100)
+fleet_freshness = integer(
+    "DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS", 120000, 1000, 14400000
+)
+minimum_freshness = reporting_request_timeout + 3 * max(
+    reporting_interval,
+    reporting_max_backoff,
+)
+if fleet_freshness < minimum_freshness:
+    fail(
+        "DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS must be at least "
+        "DNS_REPORTING_REQUEST_TIMEOUT_MILLIS + 3 * max("
+        "DNS_REPORTING_INTERVAL_MILLIS, DNS_REPORTING_MAX_BACKOFF_MILLIS)"
+    )
+
+retention_enabled = values.get(
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED", "true"
+)
+if retention_enabled not in {"true", "false"}:
+    fail("DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED must be true or false")
+values["DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED"] = retention_enabled
+session_retention = integer(
+    "DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS",
+    2592000000,
+    86400000,
+    315360000000,
+)
+cleanup_interval = integer(
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS",
+    3600000,
+    60000,
+    86400000,
+)
+integer("DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE", 500, 1, 5000)
+integer(
+    "DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN", 10, 1, 100
+)
+if cleanup_interval >= session_retention:
+    fail(
+        "DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS must be less than "
+        "DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS"
+    )
 
 for name, default in (
     ("DNS_ADMIN_DB_NAME", "dns_admin"),
@@ -315,6 +408,7 @@ def validate_secret(
     maximum_length: int,
     reject_whitespace: bool = False,
     allow_trailing_newline: bool = True,
+    container_mounted: bool = False,
 ) -> None:
     secret = secret_dir / filename
     try:
@@ -323,8 +417,13 @@ def validate_secret(
         fail(f"cannot stat secret {filename}: {error}")
     if not stat.S_ISREG(item.st_mode) or secret.is_symlink():
         fail(f"secret {filename} must be a regular non-symlink file")
-    if stat.S_IMODE(item.st_mode) & 0o077:
-        fail(f"secret {filename} must not be accessible by group/other")
+    expected_mode = 0o444 if container_mounted else 0o600
+    actual_mode = stat.S_IMODE(item.st_mode)
+    if actual_mode != expected_mode:
+        fail(
+            f"secret {filename} must have mode {expected_mode:04o}; "
+            f"found {actual_mode:04o}"
+        )
     if item.st_uid not in {0, os.geteuid()}:
         fail(f"secret {filename} must be owned by root or the deployment user")
     try:
@@ -365,8 +464,8 @@ def validate_secret(
             )
 
 
-validate_secret("postgres-password", 24, 512)
-validate_secret("grafana-admin-password", 24, 512)
+validate_secret("postgres-password", 24, 512, container_mounted=True)
+validate_secret("grafana-admin-password", 24, 512, container_mounted=True)
 policy_token_file = secret_dir / "policy-snapshot-reader-token"
 if not bootstrap or policy_token_file.exists() or policy_token_file.is_symlink():
     validate_secret(
@@ -375,9 +474,45 @@ if not bootstrap or policy_token_file.exists() or policy_token_file.is_symlink()
         512,
         reject_whitespace=True,
         allow_trailing_newline=False,
+        container_mounted=True,
+    )
+resolver_agent_token_file = secret_dir / "resolver-agent-token"
+if (
+    not bootstrap
+    or resolver_agent_token_file.exists()
+    or resolver_agent_token_file.is_symlink()
+):
+    validate_secret(
+        "resolver-agent-token",
+        32,
+        512,
+        reject_whitespace=True,
+        allow_trailing_newline=False,
+        container_mounted=True,
+    )
+fleet_metrics_token_file = secret_dir / "fleet-metrics-reader-token"
+if (
+    not bootstrap
+    and not allow_missing_fleet_metrics
+    or fleet_metrics_token_file.exists()
+    or fleet_metrics_token_file.is_symlink()
+):
+    validate_secret(
+        "fleet-metrics-reader-token",
+        32,
+        512,
+        reject_whitespace=True,
+        allow_trailing_newline=False,
+        container_mounted=True,
     )
 if bootstrap:
-    validate_secret("admin-bootstrap-token", 32, 512, reject_whitespace=True)
+    validate_secret(
+        "admin-bootstrap-token",
+        32,
+        512,
+        reject_whitespace=True,
+        container_mounted=True,
+    )
     admin_token_file = secret_dir / "admin-bootstrap-token"
     username = required("STAGING_BOOTSTRAP_USERNAME")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", username):
@@ -443,6 +578,9 @@ output_names = [
     "STAGING_SECRETS_DIR",
     "STAGING_ADMIN_TOKEN_FILE",
     "STAGING_POLICY_TOKEN_FILE",
+    "STAGING_RESOLVER_AGENT_TOKEN_FILE",
+    "STAGING_FLEET_METRICS_TOKEN_FILE",
+    "STAGING_RESOLVER_ID",
     "STAGING_GRAFANA_PASSWORD_FILE",
     "STAGING_GRAFANA_USER",
     "STAGING_STATE_DIR",
@@ -452,6 +590,9 @@ for name in output_names:
     derived = {
         "STAGING_ADMIN_TOKEN_FILE": str(admin_token_file),
         "STAGING_POLICY_TOKEN_FILE": str(policy_token_file),
+        "STAGING_RESOLVER_AGENT_TOKEN_FILE": str(resolver_agent_token_file),
+        "STAGING_FLEET_METRICS_TOKEN_FILE": str(fleet_metrics_token_file),
+        "STAGING_RESOLVER_ID": values["STAGING_RESOLVER_ID"],
         "STAGING_GRAFANA_PASSWORD_FILE": str(secret_dir / "grafana-admin-password"),
         "STAGING_GRAFANA_USER": values["GRAFANA_ADMIN_USER"],
     }
@@ -472,6 +613,9 @@ PY
             STAGING_SECRETS_DIR) STAGING_CFG_SECRETS_DIR=${value} ;;
             STAGING_ADMIN_TOKEN_FILE) STAGING_CFG_ADMIN_TOKEN_FILE=${value} ;;
             STAGING_POLICY_TOKEN_FILE) STAGING_CFG_POLICY_TOKEN_FILE=${value} ;;
+            STAGING_RESOLVER_AGENT_TOKEN_FILE) STAGING_CFG_RESOLVER_AGENT_TOKEN_FILE=${value} ;;
+            STAGING_FLEET_METRICS_TOKEN_FILE) STAGING_CFG_FLEET_METRICS_TOKEN_FILE=${value} ;;
+            STAGING_RESOLVER_ID) STAGING_CFG_RESOLVER_ID=${value} ;;
             STAGING_GRAFANA_PASSWORD_FILE) STAGING_CFG_GRAFANA_PASSWORD_FILE=${value} ;;
             STAGING_GRAFANA_USER) STAGING_CFG_GRAFANA_USER=${value} ;;
             STAGING_STATE_DIR) STAGING_CFG_STATE_DIR=${value} ;;
@@ -489,6 +633,7 @@ staging_clear_compose_environment() {
     unset STAGING_DNS_BIND_ADDRESS STAGING_DNS_PORT STAGING_ADMIN_PORT \
         STAGING_PROMETHEUS_PORT STAGING_GRAFANA_PORT STAGING_SECRETS_DIR \
         STAGING_STATE_DIR STAGING_BACKUP_DIR STAGING_BOOTSTRAP_USERNAME \
+        STAGING_RESOLVER_ID \
         DNS_WORKER_THREADS DNS_WORKER_QUEUE_CAPACITY DNS_MAX_REQUEST_BYTES \
         DNS_REQUESTS_PER_SECOND DNS_REQUEST_BURST_CAPACITY \
         DNS_TCP_MAX_CONNECTIONS DNS_TCP_MAX_CONNECTIONS_PER_CLIENT \
@@ -502,8 +647,18 @@ staging_clear_compose_environment() {
         DNS_POLICY_REQUEST_TIMEOUT_MILLIS DNS_POLICY_REFRESH_INTERVAL_MILLIS \
         DNS_POLICY_INITIAL_BACKOFF_MILLIS DNS_POLICY_MAX_BACKOFF_MILLIS \
         DNS_POLICY_MAX_RESPONSE_BYTES DNS_POLICY_MAX_RULES \
+        DNS_REPORTING_CONNECT_TIMEOUT_MILLIS \
+        DNS_REPORTING_REQUEST_TIMEOUT_MILLIS \
+        DNS_REPORTING_INTERVAL_MILLIS DNS_REPORTING_INITIAL_BACKOFF_MILLIS \
+        DNS_REPORTING_MAX_BACKOFF_MILLIS DNS_REPORTING_MAX_RESPONSE_BYTES \
         DNS_ADMIN_DB_NAME DNS_ADMIN_DB_USERNAME \
-        DNS_ADMIN_DB_POOL_SIZE PROMETHEUS_RETENTION_TIME GRAFANA_ADMIN_USER
+        DNS_ADMIN_DB_POOL_SIZE DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS \
+        DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED \
+        DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS \
+        DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS \
+        DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE \
+        DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN \
+        PROMETHEUS_RETENTION_TIME GRAFANA_ADMIN_USER
 }
 
 staging_compose() {

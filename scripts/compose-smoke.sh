@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
 # Bring up an isolated local stack with generated, non-production fixtures.
-# It verifies process readiness, private observability, live policy updates,
-# and last-known-good behavior without using config/local.env. The final
-# unblocked DNS assertion accepts any non-REFUSED outcome and therefore does
-# not depend on successful public DNS resolution.
+# It verifies process readiness, resolver-agent session/report persistence,
+# private observability, live policy updates, and last-known-good behavior
+# without using config/local.env. The final unblocked DNS assertion accepts
+# any non-REFUSED outcome and therefore does not depend on successful public
+# DNS resolution.
 set -euo pipefail
 umask 077
 
@@ -15,6 +16,8 @@ PROJECT_NAME="dns-ci-smoke-${RUN_SUFFIX}"
 ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-compose-smoke.XXXXXX")"
 ADMIN_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-admin-token.XXXXXX")"
 POLICY_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-token.XXXXXX")"
+RESOLVER_AGENT_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-resolver-agent-token.XXXXXX")"
+FLEET_METRICS_TOKEN_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-fleet-metrics-token.XXXXXX")"
 POLICY_TOKEN_BACKUP_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-token-backup.XXXXXX")"
 POLICY_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-policy-state.XXXXXX")"
 GRAFANA_PASSWORD_FILE="$(mktemp "${TMPDIR:-/tmp}/dns-grafana-password.XXXXXX")"
@@ -54,6 +57,14 @@ make_policy_token_container_readable() {
     chmod 0444 "${POLICY_TOKEN_FILE}"
 }
 
+make_resolver_agent_token_container_readable() {
+    chmod 0444 "${RESOLVER_AGENT_TOKEN_FILE}"
+}
+
+make_fleet_metrics_token_container_readable() {
+    chmod 0444 "${FLEET_METRICS_TOKEN_FILE}"
+}
+
 make_policy_token_owner_writable() {
     chmod 0600 "${POLICY_TOKEN_FILE}"
 }
@@ -78,7 +89,8 @@ cleanup() {
 
     rm -f "${ENV_FILE}" "${ADMIN_TOKEN_FILE}" \
         "${POLICY_TOKEN_FILE}" "${POLICY_TOKEN_BACKUP_FILE}" \
-        "${POLICY_STATE_FILE}" "${GRAFANA_PASSWORD_FILE}"
+        "${RESOLVER_AGENT_TOKEN_FILE}" "${POLICY_STATE_FILE}" \
+        "${FLEET_METRICS_TOKEN_FILE}" "${GRAFANA_PASSWORD_FILE}"
     exit "${exit_code}"
 }
 
@@ -96,13 +108,13 @@ checks = {
         value.get("username") == "ci-bootstrap"
         and "ADMIN" in value.get("roles", [])
     ),
-    "prometheus-target": lambda value: (
+    "prometheus-targets": lambda value: (
         value.get("status") == "success"
-        and any(
-            result.get("metric", {}).get("job") == "dns-server"
-            and result.get("value", [None, None])[1] == "1"
+        and {
+            result.get("metric", {}).get("job")
             for result in value.get("data", {}).get("result", [])
-        )
+            if result.get("value", [None, None])[1] == "1"
+        } >= {"dns-server", "admin-api"}
     ),
     "grafana-health": lambda value: value.get("database") == "ok",
     "grafana-datasource": lambda value: (
@@ -128,16 +140,16 @@ wait_for_prometheus_target() {
     for attempt in {1..30}; do
         if response="$(curl -fsS --get \
                 "http://127.0.0.1:${SMOKE_PROMETHEUS_PORT}/api/v1/query" \
-                --data-urlencode 'query=up{job="dns-server"}')" \
+                --data-urlencode 'query=up{job=~"dns-server|admin-api"}')" \
                 && printf '%s' "${response}" \
-                    | check_json prometheus-target >/dev/null 2>&1; then
+                    | check_json prometheus-targets >/dev/null 2>&1; then
             return 0
         fi
 
         sleep 2
     done
 
-    printf '%s\n' 'Prometheus did not report the dns-server target as up.' >&2
+    printf '%s\n' 'Prometheus did not report both DNS and Admin targets as up.' >&2
     return 1
 }
 
@@ -152,6 +164,39 @@ wait_for_admin_health() {
         sleep 1
     done
     printf '%s\n' 'Admin API did not become healthy.' >&2
+    return 1
+}
+
+fleet_policy_state() {
+    curl -fsS \
+        -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
+        "http://127.0.0.1:${SMOKE_ADMIN_PORT}/api/v1/admin/fleet" \
+        | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+state = payload.get("policyEnforcement")
+if not isinstance(state, str):
+    raise SystemExit("fleet response has no policyEnforcement state")
+print(state)
+'
+}
+
+wait_for_fleet_policy_state() {
+    local expected=$1
+    local attempt actual='unavailable'
+
+    for attempt in {1..60}; do
+        if actual="$(fleet_policy_state 2>/dev/null)" \
+                && [[ "${actual}" == "${expected}" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    printf 'Fleet policy state did not become %s; last state: %s\n' \
+        "${expected}" "${actual}" >&2
     return 1
 }
 
@@ -245,9 +290,19 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     DNS_POLICY_REQUEST_TIMEOUT_MILLIS DNS_POLICY_REFRESH_INTERVAL_MILLIS \
     DNS_POLICY_INITIAL_BACKOFF_MILLIS DNS_POLICY_MAX_BACKOFF_MILLIS \
     DNS_POLICY_MAX_RESPONSE_BYTES DNS_POLICY_MAX_RULES \
+    DNS_RESOLVER_AGENT_TOKEN_FILE DNS_REPORTING_CONNECT_TIMEOUT_MILLIS \
+    DNS_REPORTING_REQUEST_TIMEOUT_MILLIS DNS_REPORTING_INTERVAL_MILLIS \
+    DNS_REPORTING_INITIAL_BACKOFF_MILLIS DNS_REPORTING_MAX_BACKOFF_MILLIS \
+    DNS_REPORTING_MAX_RESPONSE_BYTES DNS_FLEET_METRICS_READER_TOKEN_FILE \
     GRAFANA_PORT GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD DNS_ADMIN_PORT \
     DNS_ADMIN_DB_NAME DNS_ADMIN_DB_USERNAME DNS_ADMIN_DB_PASSWORD \
-    DNS_ADMIN_DB_POOL_SIZE DNS_ADMIN_BOOTSTRAP_USERNAME \
+    DNS_ADMIN_DB_POOL_SIZE DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED \
+    DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE \
+    DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN \
+    DNS_ADMIN_BOOTSTRAP_USERNAME \
     DNS_ADMIN_BOOTSTRAP_TOKEN
 
 {
@@ -269,6 +324,14 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     printf '%s\n' 'DNS_POLICY_MAX_BACKOFF_MILLIS=500'
     printf '%s\n' 'DNS_POLICY_MAX_RESPONSE_BYTES=1048576'
     printf '%s\n' 'DNS_POLICY_MAX_RULES=10000'
+    printf '%s\n' "DNS_RESOLVER_AGENT_TOKEN_FILE=${RESOLVER_AGENT_TOKEN_FILE}"
+    printf '%s\n' 'DNS_REPORTING_CONNECT_TIMEOUT_MILLIS=500'
+    printf '%s\n' 'DNS_REPORTING_REQUEST_TIMEOUT_MILLIS=1000'
+    printf '%s\n' 'DNS_REPORTING_INTERVAL_MILLIS=500'
+    printf '%s\n' 'DNS_REPORTING_INITIAL_BACKOFF_MILLIS=100'
+    printf '%s\n' 'DNS_REPORTING_MAX_BACKOFF_MILLIS=500'
+    printf '%s\n' 'DNS_REPORTING_MAX_RESPONSE_BYTES=16384'
+    printf '%s\n' "DNS_FLEET_METRICS_READER_TOKEN_FILE=${FLEET_METRICS_TOKEN_FILE}"
     printf '%s\n' "PROMETHEUS_PORT=${SMOKE_PROMETHEUS_PORT}"
     printf '%s\n' 'PROMETHEUS_RETENTION_TIME=1h'
     printf '%s\n' "GRAFANA_PORT=${SMOKE_GRAFANA_PORT}"
@@ -279,6 +342,12 @@ unset DNS_PORT DNS_HEALTH_PORT DNS_REQUESTS_PER_SECOND \
     printf '%s\n' 'DNS_ADMIN_DB_USERNAME=dns_ci'
     printf '%s\n' "DNS_ADMIN_DB_PASSWORD=ci-postgres-password-${RUN_SUFFIX}"
     printf '%s\n' 'DNS_ADMIN_DB_POOL_SIZE=5'
+    printf '%s\n' 'DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS=5000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED=true'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS=86400000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS=60000'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE=10'
+    printf '%s\n' 'DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN=2'
     printf '%s\n' 'DNS_ADMIN_BOOTSTRAP_USERNAME=ci-bootstrap'
     printf '%s\n' "DNS_ADMIN_BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN}"
 } >"${ENV_FILE}"
@@ -295,6 +364,17 @@ python3 "${REPO_ROOT}/scripts/provision-policy-reader.py" \
     --admin-token-file "${ADMIN_TOKEN_FILE}" \
     --output-file "${POLICY_TOKEN_FILE}"
 make_policy_token_container_readable
+python3 "${REPO_ROOT}/scripts/provision-resolver-agent.py" \
+    --admin-url "http://127.0.0.1:${SMOKE_ADMIN_PORT}" \
+    --admin-token-file "${ADMIN_TOKEN_FILE}" \
+    --resolver-id compose-resolver-01 \
+    --output-file "${RESOLVER_AGENT_TOKEN_FILE}"
+make_resolver_agent_token_container_readable
+python3 "${REPO_ROOT}/scripts/provision-fleet-metrics-reader.py" \
+    --admin-url "http://127.0.0.1:${SMOKE_ADMIN_PORT}" \
+    --admin-token-file "${ADMIN_TOKEN_FILE}" \
+    --output-file "${FLEET_METRICS_TOKEN_FILE}"
+make_fleet_metrics_token_container_readable
 
 compose up --build --wait --wait-timeout 180
 
@@ -305,6 +385,31 @@ curl -fsS \
     -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
     "http://127.0.0.1:${SMOKE_ADMIN_PORT}/api/v1/admin/auth/me" \
     | check_json admin-identity >/dev/null
+
+fleet_state='invalid'
+for attempt in {1..60}; do
+    fleet_state="$(compose exec -T postgres sh -ec '
+        psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+            --tuples-only --no-align --command \
+            "SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM resolver_instances resolver
+                JOIN resolver_sessions session
+                  ON session.resolver_id = resolver.resolver_id
+                WHERE resolver.resolver_id = '\''compose-resolver-01'\''
+                  AND resolver.last_session_generation = 1
+                  AND resolver.active_session_id = session.session_id
+                  AND session.last_sequence >= 1
+                  AND session.last_report_received_at IS NOT NULL
+            ) THEN '\''ok'\'' ELSE '\''invalid'\'' END;"
+    ')"
+    [[ "${fleet_state}" == 'ok' ]] && break
+    sleep 1
+done
+if [[ "${fleet_state}" != 'ok' ]]; then
+    printf '%s\n' 'DNS server did not persist its automatic runtime report.' >&2
+    exit 1
+fi
 
 curl -fsS "http://127.0.0.1:${SMOKE_PROMETHEUS_PORT}/-/ready" >/dev/null
 wait_for_prometheus_target
@@ -320,6 +425,21 @@ python3 "${REPO_ROOT}/scripts/staging-smoke.py" \
     --grafana-password-file "${GRAFANA_PASSWORD_FILE}" \
     --timeout 60
 
+for attempt in {1..30}; do
+    if [[ "$(prometheus_scalar \
+            'dns_admin_fleet_policy_state{state="converged"}' \
+            2>/dev/null || true)" == "1" ]]; then
+        break
+    fi
+    sleep 2
+done
+if [[ "$(prometheus_scalar \
+        'dns_admin_fleet_policy_state{state="converged"}' \
+        2>/dev/null || true)" != "1" ]]; then
+    printf '%s\n' 'Prometheus did not observe a converged Admin fleet snapshot.' >&2
+    exit 1
+fi
+
 compose exec -T prometheus sh -ec \
     'metrics="$(wget -qO- http://dns-server:9091/metrics)"
     test -n "$metrics"
@@ -329,6 +449,9 @@ compose exec -T prometheus sh -ec \
     printf "%s\n" "$metrics" | grep -Fq "dns_policy_ready 1"
     printf "%s\n" "$metrics" | grep -Fq "dns_policy_snapshot_loaded 1"
     printf "%s\n" "$metrics" | grep -Fq "dns_policy_sync_stale 0"
+    printf "%s\n" "$metrics" \
+        | grep -Fq "dns_fleet_reporting_state{state=\"active\"} 1"
+    printf "%s\n" "$metrics" | grep -Eq "dns_fleet_reports_accepted_total [1-9]"
     printf "%s\n" "$metrics" \
         | grep -Fq "dns_parser_rejections_total{transport=\"udp\"}"
     printf "%s\n" "$metrics" \
@@ -352,6 +475,155 @@ curl -fsS --user "${SMOKE_GRAFANA_USER}:${GRAFANA_PASSWORD}" \
 curl -fsS --user "${SMOKE_GRAFANA_USER}:${GRAFANA_PASSWORD}" \
     "http://127.0.0.1:${SMOKE_GRAFANA_PORT}/api/dashboards/uid/dns-resolver-operations" \
     | check_json grafana-dashboard >/dev/null
+
+# Prove the production PostgreSQL lock path observes a publication change as
+# non-converged and returns to convergence only after a fresh resolver report.
+# Stopping DNS makes both transitions deterministic instead of racing the
+# short reporting interval used by this smoke test.
+compose stop dns-server
+FLEET_TEST_POLICY_ID="$(curl -fsS \
+    -X POST \
+    -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    --data '{"domainName":"fleet-transition.invalid","matchType":"EXACT","action":"BLOCK"}' \
+    "http://127.0.0.1:${SMOKE_ADMIN_PORT}/api/v1/admin/policies" \
+    | python3 -c '
+import json
+import sys
+
+value = json.load(sys.stdin).get("id")
+if not isinstance(value, int) or value <= 0:
+    raise SystemExit("fleet transition policy has no valid ID")
+print(value)
+')"
+wait_for_fleet_policy_state DATA_PLANE_NOT_CONVERGED
+compose up -d --wait --wait-timeout 90 dns-server
+wait_for_fleet_policy_state DATA_PLANE_CONVERGED
+
+compose stop dns-server
+curl -fsS \
+    -X DELETE \
+    -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
+    "http://127.0.0.1:${SMOKE_ADMIN_PORT}/api/v1/admin/policies/${FLEET_TEST_POLICY_ID}" \
+    >/dev/null
+wait_for_fleet_policy_state DATA_PLANE_NOT_CONVERGED
+compose up -d --wait --wait-timeout 90 dns-server
+wait_for_fleet_policy_state DATA_PLANE_CONVERGED
+
+# Age one detailed superseded session beyond retention, then restart the Admin
+# API so its immediate cleanup pass removes the detail row. The permanent boot
+# fence must survive and reject that old boot without disturbing the live
+# session or aggregate convergence.
+IFS='|' read -r PRUNED_SESSION_ID PRUNED_BOOT_ID PRUNED_APPLICATION_VERSION \
+    <<<"$(compose exec -T postgres sh -ec '
+        psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+            --tuples-only --no-align --field-separator="|" --command \
+            "SELECT session_id, boot_id, application_version
+               FROM resolver_sessions
+              WHERE resolver_id = '\''compose-resolver-01'\''
+                AND superseded_at IS NOT NULL
+              ORDER BY superseded_at, session_id
+              LIMIT 1;"
+    ')"
+if [[ ! "${PRUNED_SESSION_ID}" =~ ^[0-9a-f-]{36}$ ]] \
+        || [[ ! "${PRUNED_BOOT_ID}" =~ ^[0-9a-f-]{36}$ ]] \
+        || [[ ! "${PRUNED_APPLICATION_VERSION}" =~ ^[A-Za-z0-9._+-]{1,64}$ ]]; then
+    printf '%s\n' 'Could not identify a safe superseded resolver session fixture.' >&2
+    exit 1
+fi
+
+ACTIVE_SESSION_BEFORE_CLEANUP="$(compose exec -T postgres sh -ec '
+    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+        --tuples-only --no-align --command \
+        "SELECT active_session_id
+           FROM resolver_instances
+          WHERE resolver_id = '\''compose-resolver-01'\'';"
+')"
+if [[ ! "${ACTIVE_SESSION_BEFORE_CLEANUP}" =~ ^[0-9a-f-]{36}$ ]]; then
+    printf '%s\n' 'Resolver has no valid active session before cleanup.' >&2
+    exit 1
+fi
+
+compose exec -T postgres sh -ec "
+    psql --username \"\$POSTGRES_USER\" --dbname \"\$POSTGRES_DB\" \\
+        --command \"UPDATE resolver_sessions
+                       SET superseded_at = CURRENT_TIMESTAMP - INTERVAL '2 days'
+                     WHERE session_id = '${PRUNED_SESSION_ID}';\"
+"
+compose restart admin-api
+wait_for_admin_health
+
+cleanup_state='pending'
+for attempt in {1..60}; do
+    cleanup_state="$(compose exec -T postgres sh -ec "
+        psql --username \"\$POSTGRES_USER\" --dbname \"\$POSTGRES_DB\" \\
+            --tuples-only --no-align \\
+            --command \"SELECT CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM resolver_sessions
+                     WHERE session_id = '${PRUNED_SESSION_ID}'
+                ) THEN 'detail-present'
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM resolver_boot_fences
+                     WHERE resolver_id = 'compose-resolver-01'
+                       AND boot_id = '${PRUNED_BOOT_ID}'
+                ) THEN 'fence-missing'
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM resolver_instances
+                     WHERE resolver_id = 'compose-resolver-01'
+                       AND active_session_id = '${ACTIVE_SESSION_BEFORE_CLEANUP}'
+                ) THEN 'active-changed'
+                ELSE 'ok'
+            END;\"
+    ")"
+    [[ "${cleanup_state}" == 'ok' ]] && break
+    sleep 1
+done
+if [[ "${cleanup_state}" != 'ok' ]]; then
+    printf 'Resolver session retention check failed: %s\n' "${cleanup_state}" >&2
+    exit 1
+fi
+
+python3 - \
+    "http://127.0.0.1:${SMOKE_ADMIN_PORT}" \
+    "${RESOLVER_AGENT_TOKEN_FILE}" \
+    "${PRUNED_BOOT_ID}" \
+    "${PRUNED_APPLICATION_VERSION}" <<'PY'
+import json
+from pathlib import Path
+import sys
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+admin_url, token_path, boot_id, application_version = sys.argv[1:]
+token = Path(token_path).read_text(encoding="utf-8")
+request = Request(
+    admin_url + "/api/v1/internal/resolver/session",
+    data=json.dumps({
+        "schemaVersion": 1,
+        "bootId": boot_id,
+        "applicationVersion": application_version,
+    }).encode("utf-8"),
+    headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    build_opener(ProxyHandler({})).open(request, timeout=5)
+except HTTPError as error:
+    if error.code == 409:
+        raise SystemExit(0)
+    raise SystemExit(f"old resolver boot returned HTTP {error.code}, expected 409")
+raise SystemExit("old resolver boot unexpectedly obtained a new session")
+PY
+
+wait_for_fleet_policy_state DATA_PLANE_CONVERGED
+wait_for_metric_increase \
+    'dns_admin_fleet_session_cleanup_deleted_total' \
+    0 \
+    'detailed resolver sessions deleted by retention cleanup'
 
 policy_e2e activate \
     --admin-url "http://127.0.0.1:${SMOKE_ADMIN_PORT}" \

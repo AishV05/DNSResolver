@@ -8,22 +8,50 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=staging-common.sh
 source "${SCRIPT_DIR}/staging-common.sh"
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-    printf 'Usage: %s ACTIVE_BUNDLE_DIR CONFIG_ENV [--deployment-lock-held]\n' \
+if [[ $# -lt 2 || $# -gt 4 ]]; then
+    printf 'Usage: %s ACTIVE_BUNDLE_DIR CONFIG_ENV [--deployment-lock-held] [--pre-fleet-metrics-upgrade]\n' \
         "$(basename "$0")" >&2
     exit 2
 fi
 LOCK_IS_INHERITED=false
-if [[ $# -eq 3 ]]; then
-    [[ "$3" == --deployment-lock-held ]] \
-        || staging_fail 'the only supported third argument is --deployment-lock-held'
-    LOCK_IS_INHERITED=true
+PRE_FLEET_METRICS_UPGRADE=false
+ACTIVE_BUNDLE_INPUT=$1
+CONFIG_INPUT=$2
+shift 2
+for argument in "$@"; do
+    case "${argument}" in
+        --deployment-lock-held)
+            [[ "${LOCK_IS_INHERITED}" == false ]] \
+                || staging_fail 'duplicate --deployment-lock-held option'
+            LOCK_IS_INHERITED=true
+            ;;
+        --pre-fleet-metrics-upgrade)
+            [[ "${PRE_FLEET_METRICS_UPGRADE}" == false ]] \
+                || staging_fail 'duplicate --pre-fleet-metrics-upgrade option'
+            PRE_FLEET_METRICS_UPGRADE=true
+            ;;
+        *) staging_fail "unsupported backup option: ${argument}" ;;
+    esac
+done
+if [[ "${PRE_FLEET_METRICS_UPGRADE}" == true \
+        && "${LOCK_IS_INHERITED}" != true ]]; then
+    staging_fail '--pre-fleet-metrics-upgrade requires an inherited deployment lock'
 fi
 
 for command in docker python3 date flock grep sed; do
     staging_require_command "${command}"
 done
-staging_resolve_inputs "$1" "$2" false false
+bundle_contract=current
+if [[ "${PRE_FLEET_METRICS_UPGRADE}" == true ]]; then
+    bundle_contract=pre-fleet-metrics
+fi
+staging_resolve_inputs \
+    "${ACTIVE_BUNDLE_INPUT}" \
+    "${CONFIG_INPUT}" \
+    false \
+    false \
+    "${PRE_FLEET_METRICS_UPGRADE}" \
+    "${bundle_contract}"
 staging_compose config --quiet
 
 staging_prepare_private_directory "${STAGING_CFG_STATE_DIR}" 'state'

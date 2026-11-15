@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      initialize_fleet_metrics:
+        description: One-time upgrade from a verified pre-fleet-metrics staging release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -149,6 +154,7 @@ jobs:
       SOURCE_COMMIT: ${{ needs.prepare-staging-bundle.outputs.source_commit }}
       STAGING_CONFIG_FILE: ${{ vars.STAGING_CONFIG_FILE || '/etc/dns-platform/staging/staging.env' }}
       USE_BOOTSTRAP: ${{ inputs.bootstrap }}
+      INITIALIZE_FLEET_METRICS: ${{ inputs.initialize_fleet_metrics }}
     steps:
       - name: Check out deployment tooling from the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,8 +213,16 @@ jobs:
             "${RUNNER_TEMP}/staging-deployment"
             "${STAGING_CONFIG_FILE}"
           )
+          if [[ "${USE_BOOTSTRAP}" == true \
+              && "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+            printf '%s\n' \
+              'bootstrap and initialize_fleet_metrics are mutually exclusive' >&2
+            exit 1
+          fi
           if [[ "${USE_BOOTSTRAP}" == true ]]; then
             arguments+=(--bootstrap)
+          elif [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+            arguments+=(--initialize-fleet-metrics)
           fi
           ./scripts/staging-deploy.sh "${arguments[@]}"
 

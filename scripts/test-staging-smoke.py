@@ -84,6 +84,28 @@ class QuietHandler(BaseHTTPRequestHandler):
                 {"userId": 1, "username": "staging-operator", "roles": ["ADMIN"]}
             )
             return
+        if self.service == "admin" and parsed.path == "/api/v1/admin/fleet":
+            if self.headers.get("Authorization") != f"Bearer {ADMIN_TOKEN}":
+                self._send_json({"error": "unauthorized"}, 401)
+                return
+            self._send_json(
+                {
+                    "schemaVersion": 1,
+                    "policyEnforcement": "DATA_PLANE_CONVERGED",
+                    "expectedResolverCount": 1,
+                    "freshResolverCount": 1,
+                    "convergedResolverCount": 1,
+                    "resolvers": [
+                        {
+                            "resolverId": "staging-dns-1",
+                            "expected": True,
+                            "state": "CONVERGED",
+                            "reportFresh": True,
+                        }
+                    ],
+                }
+            )
+            return
         if self.service == "grafana" and parsed.path == "/api/health":
             self._send_json({"database": "ok", "version": "test"})
             return
@@ -124,6 +146,12 @@ class QuietHandler(BaseHTTPRequestHandler):
                 expression = parse_qs(parsed.query).get("query", [""])[0]
                 samples = {
                     'up{job="dns-server"}': 1,
+                    'up{job="admin-api"}': 1,
+                    'dns_admin_fleet_policy_state{state="converged"}': 1,
+                    'dns_admin_fleet_sessions{state="active"}': 1,
+                    "dns_admin_fleet_boot_fence_entries": 1,
+                    'dns_admin_fleet_session_cleanup_runs_total{result="success"}': 1,
+                    "dns_admin_fleet_session_retention_seconds": 2_592_000,
                     'dns_transport_listener_running{transport="udp"}': 1,
                     'dns_transport_listener_running{transport="tcp"}': 1,
                     'dns_policy_mode{mode="required"}': 1,

@@ -58,8 +58,24 @@ class AdminSecurityConfiguration {
                                 "/api/v1/internal/policy-snapshot"
                         ).hasAnyRole(
                                 AdminRole.POLICY_SNAPSHOT_READER.name(),
+                                AdminRole.RESOLVER_AGENT.name(),
                                 AdminRole.ADMIN.name()
                         )
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/v1/internal/fleet-metrics"
+                        ).hasAnyRole(
+                                AdminRole.FLEET_METRICS_READER.name(),
+                                AdminRole.ADMIN.name()
+                        )
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/v1/internal/resolver/session"
+                        ).hasRole(AdminRole.RESOLVER_AGENT.name())
+                        .requestMatchers(
+                                HttpMethod.PUT,
+                                "/api/v1/internal/resolver/report"
+                        ).hasRole(AdminRole.RESOLVER_AGENT.name())
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/admin/auth/me"
@@ -71,6 +87,9 @@ class AdminSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/admin/status",
+                                "/api/v1/admin/fleet",
+                                "/api/v1/admin/resolvers",
+                                "/api/v1/admin/resolvers/**",
                                 "/api/v1/admin/policies",
                                 "/api/v1/admin/policies/**"
                         ).hasAnyRole(
@@ -78,6 +97,14 @@ class AdminSecurityConfiguration {
                                 AdminRole.POLICY_EDITOR.name(),
                                 AdminRole.ADMIN.name()
                         )
+                        .requestMatchers(
+                                HttpMethod.PUT,
+                                "/api/v1/admin/resolvers/*"
+                        ).hasRole(AdminRole.ADMIN.name())
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/v1/admin/resolvers"
+                        ).hasRole(AdminRole.ADMIN.name())
                         .requestMatchers(
                                 HttpMethod.POST,
                                 "/api/v1/admin/policies"

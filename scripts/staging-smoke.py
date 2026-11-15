@@ -34,6 +34,8 @@ MAX_HTTP_BODY_BYTES = 1_048_576
 POLL_INTERVAL_SECONDS = 0.5
 EXPECTED_ALERTS = {
     "DnsAdmissionDropsHigh",
+    "DnsFleetReportingFailures",
+    "DnsFleetReportingFenced",
     "DnsPolicyNotReady",
     "DnsPolicySyncFailures",
     "DnsPolicySyncStale",
@@ -41,6 +43,13 @@ EXPECTED_ALERTS = {
     "DnsServerTargetDown",
     "DnsTcpListenerDown",
     "DnsUdpListenerDown",
+    "DnsUpstreamResponsesRejectedHigh",
+    "DnsCacheEvictionsHigh",
+    "DnsAdminApiTargetDown",
+    "DnsFleetUnobserved",
+    "DnsFleetNotConverged",
+    "DnsFleetSessionCleanupFailures",
+    "DnsFleetSessionRetentionBacklog",
 }
 
 
@@ -212,6 +221,40 @@ def _check_admin_identity(base_url: str, token: str, deadline: float) -> None:
         or "ADMIN" not in roles
     ):
         _fail("Admin API token does not identify an enabled ADMIN principal")
+
+
+def _check_fleet_convergence(base_url: str, token: str, deadline: float) -> None:
+    value = _json_object(
+        _http_get(
+            f"{base_url}/api/v1/admin/fleet",
+            deadline,
+            "Admin API resolver fleet status",
+            {"Authorization": f"Bearer {token}"},
+        ),
+        "Admin API resolver fleet status",
+    )
+    expected = value.get("expectedResolverCount")
+    fresh = value.get("freshResolverCount")
+    converged = value.get("convergedResolverCount")
+    members = value.get("resolvers")
+    if (
+        value.get("schemaVersion") != 1
+        or value.get("policyEnforcement") != "DATA_PLANE_CONVERGED"
+        or not isinstance(expected, int)
+        or expected < 1
+        or fresh != expected
+        or converged != expected
+        or not isinstance(members, list)
+    ):
+        _fail("resolver fleet is not converged on the published policy")
+    for member in members:
+        if not isinstance(member, dict):
+            _fail("resolver fleet member is not a JSON object")
+        if member.get("expected") is True and (
+            member.get("state") != "CONVERGED"
+            or member.get("reportFresh") is not True
+        ):
+            _fail("an expected resolver is not fresh and converged")
 
 
 def _check_prometheus_ready(base_url: str, deadline: float) -> None:
@@ -611,6 +654,11 @@ def run_smoke(
         lambda: _check_admin_identity(admin_base, admin_token, deadline),
     )
     _wait_for(
+        "resolver fleet convergence",
+        deadline,
+        lambda: _check_fleet_convergence(admin_base, admin_token, deadline),
+    )
+    _wait_for(
         "Prometheus readiness",
         deadline,
         lambda: _check_prometheus_ready(prometheus_base, deadline),
@@ -636,6 +684,60 @@ def run_smoke(
         lambda: _check_single_one(
             prometheus_base,
             'up{job="dns-server"}',
+            deadline,
+        ),
+    )
+    _wait_for(
+        "Prometheus Admin API target",
+        deadline,
+        lambda: _check_single_one(
+            prometheus_base,
+            'up{job="admin-api"}',
+            deadline,
+        ),
+    )
+    _wait_for(
+        "Prometheus converged fleet metric",
+        deadline,
+        lambda: _check_single_one(
+            prometheus_base,
+            'dns_admin_fleet_policy_state{state="converged"}',
+            deadline,
+        ),
+    )
+    _wait_for(
+        "active resolver session metric",
+        deadline,
+        lambda: _check_single_positive(
+            prometheus_base,
+            'dns_admin_fleet_sessions{state="active"}',
+            deadline,
+        ),
+    )
+    _wait_for(
+        "resolver boot fence metric",
+        deadline,
+        lambda: _check_single_positive(
+            prometheus_base,
+            "dns_admin_fleet_boot_fence_entries",
+            deadline,
+        ),
+    )
+    _wait_for(
+        "resolver session cleanup metric",
+        deadline,
+        lambda: _check_single_positive(
+            prometheus_base,
+            'dns_admin_fleet_session_cleanup_runs_total{result="success"}',
+            deadline,
+        ),
+    )
+    _wait_for(
+        "resolver session retention setting metric",
+        deadline,
+        lambda: _check_single_positive(
+            prometheus_base,
+            "dns_admin_fleet_session_retention_seconds",
             deadline,
         ),
     )

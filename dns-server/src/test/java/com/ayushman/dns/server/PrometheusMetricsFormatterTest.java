@@ -68,13 +68,26 @@ class PrometheusMetricsFormatterTest {
         policyTelemetry.recordSyncActivated();
         policyTelemetry.recordBlocked(DnsTransport.UDP);
         policyTelemetry.recordUnavailable(DnsTransport.TCP);
+        ResolverReportingTelemetry reportingTelemetry =
+                new ResolverReportingTelemetry(
+                        ResolverReportingMode.ENABLED,
+                        Clock.fixed(
+                                Instant.parse("2026-10-05T00:00:30Z"),
+                                ZoneOffset.UTC
+                        )
+                );
+        reportingTelemetry.recordAttempt();
+        reportingTelemetry.recordSessionEstablished();
+        reportingTelemetry.recordAttempt();
+        reportingTelemetry.recordReportAccepted();
 
         String output = PrometheusMetricsFormatter.format(
                 true,
                 true,
                 true,
                 metrics.snapshot(),
-                policyTelemetry.snapshot(policyStore.snapshotStatus())
+                policyTelemetry.snapshot(policyStore.snapshotStatus()),
+                reportingTelemetry.snapshot()
         );
 
         assertTrue(output.contains("# TYPE dns_server_running gauge\n"));
@@ -169,6 +182,16 @@ class PrometheusMetricsFormatterTest {
                 "dns_policy_unavailable_requests_total{transport=\"tcp\"} 1\n"
         ));
         assertTrue(output.contains("dns_policy_sync_stale 0\n"));
+        assertTrue(output.contains(
+                "dns_fleet_reporting_mode{mode=\"enabled\"} 1\n"
+        ));
+        assertTrue(output.contains(
+                "dns_fleet_reporting_state{state=\"active\"} 1\n"
+        ));
+        assertTrue(output.contains("dns_fleet_reporting_attempts_total 2\n"));
+        assertTrue(output.contains("dns_fleet_sessions_established_total 1\n"));
+        assertTrue(output.contains("dns_fleet_reports_accepted_total 1\n"));
+        assertTrue(output.contains("dns_fleet_reporting_failures_total 0\n"));
         assertTrue(output.endsWith("\n"));
     }
 }

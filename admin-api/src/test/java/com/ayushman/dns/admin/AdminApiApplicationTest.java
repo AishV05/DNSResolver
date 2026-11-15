@@ -2,6 +2,7 @@ package com.ayushman.dns.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.ayushman.dns.fleet.ResolverFleetPolicyState;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.resttestclient.TestRestTemplate;
@@ -54,7 +55,7 @@ class AdminApiApplicationTest {
         assertThat(response.getBody().policyDistribution())
                 .isEqualTo("SNAPSHOT_AVAILABLE");
         assertThat(response.getBody().policyEnforcement())
-                .isEqualTo("DATA_PLANE_UNOBSERVED");
+                .isEqualTo(ResolverFleetPolicyState.DATA_PLANE_UNOBSERVED);
     }
 
     @Test
@@ -73,6 +74,6 @@ class AdminApiApplicationTest {
         return "http://127.0.0.1:" + port + path;
     }
 
-    private record HealthResponse(String status) {
+    private record HealthResponse(String status, Object groups) {
     }
 }

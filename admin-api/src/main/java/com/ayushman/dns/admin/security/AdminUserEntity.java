@@ -74,6 +74,10 @@ class AdminUserEntity {
         this.roles = EnumSet.copyOf(roles);
     }
 
+    void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
     @PrePersist
     void initializeTimestamps() {
         Instant now = Instant.now();

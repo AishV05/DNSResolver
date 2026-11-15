@@ -227,7 +227,7 @@ class ProvisionPolicyReaderTest(unittest.TestCase):
         first_token = self.output_file.read_text(encoding="ascii").strip()
         self.assertFalse(self.output_file.read_bytes().endswith(b"\n"))
         self.assertNotIn(first_token, first_stdout + first_stderr)
-        self.assertEqual(0o600, stat.S_IMODE(self.output_file.stat().st_mode))
+        self.assertEqual(0o444, stat.S_IMODE(self.output_file.stat().st_mode))
         self.assertEqual([MODULE.ROLE], self.state.users[0]["roles"])
 
         second_result, second_stdout, second_stderr = self._run()

@@ -4,6 +4,8 @@ public class Main {
     public static void main(String[] args) throws Exception {
         ServerConfig config = ServerConfig.fromSystem();
         PolicySyncConfig policyConfig = PolicySyncConfig.fromSystem();
+        ResolverReportingConfig reportingConfig =
+                ResolverReportingConfig.fromSystem();
         PolicySnapshotStore policyStore = new PolicySnapshotStore(
                 policyConfig.mode()
         );
@@ -16,6 +18,14 @@ public class Main {
                         policyStore,
                         policyTelemetry
                 );
+        ResolverReportingTelemetry reportingTelemetry =
+                new ResolverReportingTelemetry(reportingConfig.mode());
+        ResolverFleetReporter fleetReporter = new ResolverFleetReporter(
+                reportingConfig,
+                policyStore,
+                policyTelemetry,
+                reportingTelemetry
+        );
         DnsServer dnsServer = new DnsServer(
                 config,
                 policyStore,
@@ -28,10 +38,12 @@ public class Main {
         MetricsServer metricsServer = new MetricsServer(
                 config.metricsPort(),
                 config.metricsBindAddress(),
-                dnsServer
+                dnsServer,
+                fleetReporter
         );
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            fleetReporter.close();
             policySynchronizer.close();
             metricsServer.close();
             healthServer.close();
@@ -42,8 +54,10 @@ public class Main {
             healthServer.start();
             metricsServer.start();
             policySynchronizer.start();
+            fleetReporter.start();
             dnsServer.start();
         } finally {
+            fleetReporter.close();
             policySynchronizer.close();
             metricsServer.close();
             healthServer.close();

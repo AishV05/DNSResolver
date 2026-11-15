@@ -77,6 +77,11 @@ public class AdminIdentityService {
 
     @Transactional
     AdminUserResponse createUser(CreateAdminUserRequest request) {
+        if (request.role() == AdminRole.RESOLVER_AGENT) {
+            throw new IllegalArgumentException(
+                    "resolver agents must be created through resolver registration"
+            );
+        }
         String username = AdminUsername.normalize(request.username());
         userRepository.findByUsername(username).ifPresent(ignored -> {
             throw new DuplicateAdminUsernameException(username);
@@ -86,6 +91,63 @@ public class AdminIdentityService {
                 new AdminUserEntity(username, Set.of(request.role()))
         );
         return toUserResponse(user);
+    }
+
+    /**
+     * Creates the dedicated machine identity and first token for a resolver.
+     * The surrounding registration transaction owns the one-to-one binding.
+     */
+    @Transactional
+    public IssuedAdminApiTokenResponse createResolverAgent(
+            String resolverId,
+            Instant expiresAt
+    ) {
+        if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
+            throw new IllegalArgumentException("token expiration must be in the future");
+        }
+        String username = "resolver-" + TokenHasher.sha256(resolverId)
+                .substring(0, 55);
+        userRepository.findByUsername(username).ifPresent(ignored -> {
+            throw new DuplicateAdminUsernameException(username);
+        });
+
+        AdminUserEntity user = userRepository.saveAndFlush(
+                new AdminUserEntity(username, Set.of(AdminRole.RESOLVER_AGENT))
+        );
+        String rawToken = tokenGenerator.generate();
+        AdminApiTokenEntity token = tokenRepository.saveAndFlush(
+                new AdminApiTokenEntity(
+                        user,
+                        TokenHasher.sha256(rawToken),
+                        "resolver-agent",
+                        expiresAt
+                )
+        );
+        return new IssuedAdminApiTokenResponse(
+                token.getId(),
+                user.getId(),
+                user.getUsername(),
+                token.getTokenLabel(),
+                rawToken,
+                token.getCreatedAt(),
+                token.getExpiresAt()
+        );
+    }
+
+    /**
+     * Enables or disables the dedicated identity bound to a resolver.
+     * Disabling the identity makes every one of its tokens unusable without
+     * destroying token metadata needed for later re-enablement or audit.
+     */
+    @Transactional
+    public void setResolverAgentEnabled(long userId, boolean enabled) {
+        AdminUserEntity user = findUser(userId);
+        if (!user.getRoles().equals(Set.of(AdminRole.RESOLVER_AGENT))) {
+            throw new IllegalArgumentException(
+                    "identity is not a dedicated resolver agent"
+            );
+        }
+        user.setEnabled(enabled);
     }
 
     @Transactional(readOnly = true)

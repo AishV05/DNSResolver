@@ -4,6 +4,113 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: an unavailable Admin API metrics target becomes critical
+    interval: 1m
+    input_series:
+      - series: 'up{job="admin-api",instance="admin-api:8081"}'
+        values: 0x10
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DnsAdminApiTargetDown
+        exp_alerts:
+          - exp_labels:
+              instance: admin-api:8081
+              job: admin-api
+              severity: critical
+            exp_annotations:
+              summary: Admin API fleet metrics target is down
+              description: >-
+                Prometheus has been unable to scrape the authenticated Admin
+                API fleet metrics endpoint for at least two minutes. Check the
+                Admin API, its scrape credential, and the internal
+                observability network.
+
+  - name: an unobserved resolver fleet becomes critical
+    interval: 1m
+    input_series:
+      - series: 'dns_admin_fleet_policy_state{state="unobserved"}'
+        values: 1x10
+      - series: 'dns_admin_fleet_policy_state{state="converged"}'
+        values: 0x10
+      - series: 'dns_admin_fleet_policy_state{state="not_converged"}'
+        values: 0x10
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DnsFleetUnobserved
+        exp_alerts:
+          - exp_labels:
+              state: unobserved
+              severity: critical
+            exp_annotations:
+              summary: Resolver fleet has no expected members
+              description: >-
+                No enabled resolver registration has been present in the
+                expected fleet for at least five minutes. Register or re-enable
+                the intended resolver before treating policy convergence as
+                observed.
+
+  - name: a resolver fleet policy mismatch becomes warning
+    interval: 1m
+    input_series:
+      - series: 'dns_admin_fleet_policy_state{state="unobserved"}'
+        values: 0x10
+      - series: 'dns_admin_fleet_policy_state{state="converged"}'
+        values: 0x10
+      - series: 'dns_admin_fleet_policy_state{state="not_converged"}'
+        values: 1x10
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DnsFleetNotConverged
+        exp_alerts:
+          - exp_labels:
+              state: not_converged
+              severity: warning
+            exp_annotations:
+              summary: Resolver fleet has not converged on published policy
+              description: >-
+                At least one expected resolver has no current fresh report, is
+                not policy-ready, or disagrees with the published revision or
+                enabled rule count. Inspect the fleet member-state counts
+                before changing policy.
+
+  - name: repeated session cleanup failures become warning
+    interval: 1m
+    input_series:
+      - series: dns_admin_fleet_session_cleanup_consecutive_failures
+        values: 3x12
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DnsFleetSessionCleanupFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Resolver session cleanup is repeatedly failing
+              description: >-
+                At least three consecutive detailed-session cleanup runs have
+                failed for five minutes. Replay fences remain intact, but
+                superseded session history may continue growing. Inspect the
+                Admin API logs and database health.
+
+  - name: a saturated session cleanup backlog becomes warning
+    interval: 1m
+    input_series:
+      - series: dns_admin_fleet_session_cleanup_saturated
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DnsFleetSessionRetentionBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Resolver session retention backlog is sustained
+              description: >-
+                Retention-eligible resolver sessions have remained after
+                bounded cleanup runs for fifteen minutes. Increase cleanup
+                capacity only after checking database health and session
+                churn.
+
   - name: required policy without a snapshot becomes critical
     interval: 1m
     input_series:
@@ -82,6 +189,45 @@ tests:
                 minutes. Check upstream reachability and
                 response-correlation telemetry; rejected packets are not
                 followed or cached.
+
+  - name: a fenced resolver reporting session becomes critical
+    interval: 1m
+    input_series:
+      - series: 'dns_fleet_reporting_state{state="fenced"}'
+        values: 1x10
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DnsFleetReportingFenced
+        exp_alerts:
+          - exp_labels:
+              state: fenced
+              severity: critical
+            exp_annotations:
+              summary: Resolver fleet reporting session is fenced
+              description: >-
+                The control plane rejected the resolver's active reporting
+                session. DNS serving and last-known-good policy remain
+                available, but this process will not send another runtime
+                report until it is restarted with a valid resolver credential.
+
+  - name: repeated resolver reporting failures become warning
+    interval: 1m
+    input_series:
+      - series: dns_fleet_reporting_failures_total
+        values: 0 1 2 3 4 5 6 7 8 9 10 11
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DnsFleetReportingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Resolver fleet reporting is repeatedly failing
+              description: >-
+                At least three session or report operations failed in the
+                trailing five-minute window for five minutes. Check
+                control-plane reachability and the resolver-agent credential;
+                DNS readiness is intentionally unaffected.
 
   - name: sustained bounded cache pressure becomes warning
     interval: 1m

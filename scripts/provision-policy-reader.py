@@ -214,6 +214,10 @@ def _write_token_atomically(path: Path, token: str) -> None:
         raise ProvisioningError("output directory must be a regular non-symlink directory")
     if parent_metadata.st_uid not in {0, os.geteuid()}:
         raise ProvisioningError("output directory must be owned by root or the current user")
+    if stat.S_IMODE(parent_metadata.st_mode) & 0o077:
+        raise ProvisioningError(
+            "output directory must not be accessible by group/other"
+        )
     try:
         if path.exists() or path.is_symlink():
             metadata = path.lstat()
@@ -245,7 +249,11 @@ def _write_token_atomically(path: Path, token: str) -> None:
             os.fsync(destination.fileno())
         os.replace(temporary_name, path)
         temporary_name = ""
-        os.chmod(path, 0o600)
+        # Native Docker Compose mounts file-backed secrets with the source
+        # ownership and mode. The DNS image runs as a non-root user, so the
+        # individual file must be readable in the container. Its 0700 parent
+        # directory remains the host-side confidentiality boundary.
+        os.chmod(path, 0o444)
         directory_descriptor = os.open(parent, os.O_RDONLY)
         try:
             os.fsync(directory_descriptor)

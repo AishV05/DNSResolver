@@ -7,7 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 usage() {
-    printf 'Usage: %s BUNDLE_DIR\n' "$(basename "$0")" >&2
+    printf 'Usage: %s BUNDLE_DIR [--contract current|pre-fleet-metrics]\n' \
+        "$(basename "$0")" >&2
 }
 
 fail() {
@@ -15,12 +16,19 @@ fail() {
     exit 1
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -ne 1 && $# -ne 3 ]]; then
     usage
     exit 2
 fi
 
 BUNDLE_INPUT=$1
+CONTRACT=current
+if [[ $# -eq 3 ]]; then
+    [[ "$2" == --contract ]] || { usage; exit 2; }
+    CONTRACT=$3
+fi
+[[ "${CONTRACT}" == current || "${CONTRACT}" == pre-fleet-metrics ]] \
+    || fail 'bundle contract must be current or pre-fleet-metrics'
 [[ -d "${BUNDLE_INPUT}" ]] \
     || fail "bundle directory does not exist: ${BUNDLE_INPUT}"
 [[ ! -L "${BUNDLE_INPUT}" ]] \
@@ -40,7 +48,7 @@ command -v python3 >/dev/null 2>&1 \
     "${REPO_ROOT}/release/release-assets-manifest.schema.json" \
     "${BUNDLE_DIR}/release-assets-manifest.json"
 
-python3 - "${BUNDLE_DIR}" <<'PY'
+python3 - "${BUNDLE_DIR}" "${CONTRACT}" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -53,6 +61,7 @@ from typing import Any
 
 
 root = Path(sys.argv[1])
+contract = sys.argv[2]
 
 expected_payloads = {
     "compose.bootstrap.yaml": ("bootstrap-compose", "application/yaml"),
@@ -378,20 +387,87 @@ policy_contract = {
 for snippet in policy_contract:
     if base_compose.count(snippet) != 1:
         fail(f"staging policy-distribution contract differs: {snippet}")
-if base_compose.count("      - policy-distribution\n") != 2:
+reporting_contract = {
+    'DNS_REPORTING_MODE: "ENABLED"',
+    'DNS_REPORTING_CONTROL_PLANE_URL: "http://admin-api:8081"',
+    'DNS_REPORTING_TOKEN_FILE: "/run/secrets/resolver-agent-token"',
+    'DNS_REPORTING_ALLOW_INSECURE_HTTP: "true"',
+    (
+        'file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the '
+        'root-owned secret directory}/resolver-agent-token"'
+    ),
+}
+for snippet in reporting_contract:
+    if base_compose.count(snippet) != 1:
+        fail(f"staging resolver-reporting contract differs: {snippet}")
+metrics_contract = {
+    (
+        'file: "${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the '
+        'root-owned secret directory}/fleet-metrics-reader-token"'
+    ),
+    'source: fleet-metrics-reader-token',
+    'target: fleet-metrics-reader-token',
+}
+prometheus_config = (
+    root / "observability/prometheus/prometheus.yml"
+).read_text(encoding="utf-8")
+if contract == "current":
+    for snippet in metrics_contract:
+        if base_compose.count(snippet) != 1:
+            fail(f"staging fleet-metrics credential contract differs: {snippet}")
+    for snippet in (
+        "job_name: admin-api",
+        "/api/v1/internal/fleet-metrics",
+        "credentials_file: /run/secrets/fleet-metrics-reader-token",
+    ):
+        if prometheus_config.count(snippet) != 1:
+            fail(f"staging authenticated Admin scrape contract differs: {snippet}")
+else:
+    for snippet in (
+        "fleet-metrics-reader-token",
+        "admin-observability",
+    ):
+        if snippet in base_compose:
+            fail(f"legacy staging Compose contains partial fleet metrics wiring: {snippet}")
+    for snippet in (
+        "job_name: admin-api",
+        "/api/v1/internal/fleet-metrics",
+        "credentials_file:",
+    ):
+        if snippet in prometheus_config:
+            fail(f"legacy Prometheus config contains partial Admin scrape wiring: {snippet}")
+if (
+    base_compose.count("      policy-distribution:\n") != 1
+    or base_compose.count("      - policy-distribution\n") != 1
+):
     fail("exactly dns-server and admin-api must join policy-distribution")
+if (
+    "      dns-egress:\n"
+    "        gw_priority: 1\n"
+) not in base_compose:
+    fail("dns-egress must be the DNS server default gateway")
 if (
     "  policy-distribution:\n"
     "    driver: bridge\n"
     "    internal: true\n"
 ) not in base_compose:
     fail("policy-distribution must be a dedicated internal bridge network")
+if contract == "current":
+    if (
+        base_compose.count("      - admin-observability\n") != 2
+        or "  admin-observability:\n"
+        "    driver: bridge\n"
+        "    internal: true\n" not in base_compose
+    ):
+        fail("admin-observability must be private to Admin API and Prometheus")
 
 for path in root.rglob("*"):
     if path.is_file() and path.name in {
         "admin-bootstrap-token",
         "admin-operator-token",
         "policy-snapshot-reader-token",
+        "resolver-agent-token",
+        "fleet-metrics-reader-token",
         "postgres-password",
         "grafana-admin-password",
     }:

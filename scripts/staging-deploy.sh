@@ -9,7 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "${SCRIPT_DIR}/staging-common.sh"
 
 usage() {
-    printf 'Usage: %s BUNDLE_DIR CONFIG_ENV [--bootstrap]\n' "$(basename "$0")" >&2
+    printf 'Usage: %s BUNDLE_DIR CONFIG_ENV [--bootstrap|--initialize-fleet-metrics]\n' \
+        "$(basename "$0")" >&2
 }
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
@@ -19,9 +20,13 @@ fi
 BUNDLE_INPUT=$1
 CONFIG_INPUT=$2
 USE_BOOTSTRAP=false
+INITIALIZE_FLEET_METRICS=false
 if [[ $# -eq 3 ]]; then
-    [[ "$3" == --bootstrap ]] || { usage; exit 2; }
-    USE_BOOTSTRAP=true
+    case "$3" in
+        --bootstrap) USE_BOOTSTRAP=true ;;
+        --initialize-fleet-metrics) INITIALIZE_FLEET_METRICS=true ;;
+        *) usage; exit 2 ;;
+    esac
 fi
 
 for command in docker python3 flock cmp grep sed sort; do
@@ -30,7 +35,12 @@ done
 docker compose version >/dev/null \
     || staging_fail 'Docker Compose plugin is unavailable'
 
-staging_resolve_inputs "${BUNDLE_INPUT}" "${CONFIG_INPUT}" "${USE_BOOTSTRAP}"
+staging_resolve_inputs \
+    "${BUNDLE_INPUT}" \
+    "${CONFIG_INPUT}" \
+    "${USE_BOOTSTRAP}" \
+    true \
+    "${INITIALIZE_FLEET_METRICS}"
 staging_verify_host_bind_address
 server_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" \
     || staging_fail 'cannot query Docker Engine platform'
@@ -96,7 +106,13 @@ if [[ -e "${current_file}" || -L "${current_file}" ]]; then
     previous_key="$(staging_read_current_release "${current_file}")" \
         || staging_fail 'current deployment state contains an invalid release identity'
     previous_bundle="${STAGING_CFG_STATE_DIR}/releases/${previous_key}"
-    "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" "${previous_bundle}"
+    if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+        "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" \
+            "${previous_bundle}" \
+            --contract pre-fleet-metrics
+    else
+        "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" "${previous_bundle}"
+    fi
 elif [[ -n "$(staging_compose ps --all --quiet)" ]]; then
     staging_fail 'staging containers exist without an applied-state record'
 fi
@@ -104,27 +120,79 @@ fi
 if [[ "${USE_BOOTSTRAP}" == true && -n "${previous_bundle}" ]]; then
     staging_fail '--bootstrap is allowed only for the first staging initialization'
 fi
-
+if [[ "${INITIALIZE_FLEET_METRICS}" == true && -z "${previous_bundle}" ]]; then
+    staging_fail '--initialize-fleet-metrics requires a previously applied release'
+fi
 pre_migration_state='absent'
 if [[ -n "${previous_bundle}" ]]; then
-    staging_resolve_inputs "${previous_bundle}" "${CONFIG_INPUT}" false
+    previous_contract=current
+    if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+        previous_contract=pre-fleet-metrics
+    fi
+    staging_resolve_inputs \
+        "${previous_bundle}" \
+        "${CONFIG_INPUT}" \
+        false \
+        true \
+        "${INITIALIZE_FLEET_METRICS}" \
+        "${previous_contract}"
     if staging_compose ps --status running --services | grep -Fx postgres >/dev/null; then
         staging_compose pull
         staging_verify_pulled_images
         pre_migration_state="$(staging_flyway_state)"
+        backup_arguments=(--deployment-lock-held)
+        if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+            backup_arguments+=(--pre-fleet-metrics-upgrade)
+        fi
         "${SCRIPT_DIR}/staging-backup.sh" \
             "${previous_bundle}" \
             "${CONFIG_INPUT}" \
-            --deployment-lock-held
+            "${backup_arguments[@]}"
     else
         staging_fail 'previously applied staging database is not running'
     fi
 fi
 
 # Return to the candidate after inspecting and backing up the active release.
-staging_resolve_inputs "${target_state_bundle}" "${CONFIG_INPUT}" "${USE_BOOTSTRAP}"
+staging_resolve_inputs \
+    "${target_state_bundle}" \
+    "${CONFIG_INPUT}" \
+    "${USE_BOOTSTRAP}" \
+    true \
+    "${INITIALIZE_FLEET_METRICS}"
 staging_compose pull
 staging_verify_pulled_images
+
+if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+    # One-time upgrade from a pre-19E release. The deployment lock is held and
+    # the previous database has already been backed up. Start only the
+    # candidate database/Admin pair so Flyway can authorize the new role,
+    # provision its credential, and then re-run strict steady-state validation
+    # before Prometheus or the full candidate stack is started.
+    if ! (
+        staging_compose up \
+            --detach \
+            --no-build \
+            --pull never \
+            --wait \
+            --wait-timeout 180 \
+            postgres admin-api \
+        && python3 "${SCRIPT_DIR}/provision-fleet-metrics-reader.py" \
+            --admin-url "http://127.0.0.1:${STAGING_CFG_ADMIN_PORT}" \
+            --admin-token-file "${STAGING_CFG_ADMIN_TOKEN_FILE}" \
+            --output-file "${STAGING_CFG_FLEET_METRICS_TOKEN_FILE}" \
+        && staging_resolve_inputs "${target_state_bundle}" "${CONFIG_INPUT}" false \
+        && staging_compose config --quiet
+    ); then
+        printf '%s\n' \
+            'Fleet-metrics initialization failed after candidate Admin startup; current state was not advanced and automatic rollback is intentionally refused.' >&2
+        printf '%s\n' \
+            'Preserve the verified backup and volumes, correct the failure, then retry the same initialization command.' >&2
+        exit 1
+    fi
+    staging_resolve_inputs "${target_state_bundle}" "${CONFIG_INPUT}" false
+    staging_compose config --quiet
+fi
 
 if [[ "${USE_BOOTSTRAP}" == true ]]; then
     # The resolver is deliberately REQUIRED/fail-closed, so initialize the
@@ -143,6 +211,15 @@ if [[ "${USE_BOOTSTRAP}" == true ]]; then
         --admin-url "http://127.0.0.1:${STAGING_CFG_ADMIN_PORT}" \
         --admin-token-file "${STAGING_CFG_ADMIN_TOKEN_FILE}" \
         --output-file "${STAGING_CFG_POLICY_TOKEN_FILE}"
+    python3 "${SCRIPT_DIR}/provision-resolver-agent.py" \
+        --admin-url "http://127.0.0.1:${STAGING_CFG_ADMIN_PORT}" \
+        --admin-token-file "${STAGING_CFG_ADMIN_TOKEN_FILE}" \
+        --resolver-id "${STAGING_CFG_RESOLVER_ID}" \
+        --output-file "${STAGING_CFG_RESOLVER_AGENT_TOKEN_FILE}"
+    python3 "${SCRIPT_DIR}/provision-fleet-metrics-reader.py" \
+        --admin-url "http://127.0.0.1:${STAGING_CFG_ADMIN_PORT}" \
+        --admin-token-file "${STAGING_CFG_ADMIN_TOKEN_FILE}" \
+        --output-file "${STAGING_CFG_FLEET_METRICS_TOKEN_FILE}"
     STAGING_USE_BOOTSTRAP=false
     staging_compose config --quiet
 fi
@@ -195,6 +272,14 @@ fi
 if [[ -z "${previous_bundle}" ]]; then
     printf '%s\n' \
         'No previously successful release exists; inspect the candidate without deleting volumes.' >&2
+    exit 1
+fi
+
+if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+    printf '%s\n' \
+        'The one-time fleet-metrics initialization changed or may have changed database migration state; automatic image rollback was refused.' >&2
+    printf '%s\n' \
+        'The previous current record and verified backup were preserved; correct the candidate and retry the same initialization command.' >&2
     exit 1
 fi
 

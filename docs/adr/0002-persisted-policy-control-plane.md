@@ -18,8 +18,10 @@ Policy records normalize DNS domain names, specify an explicit match type, are
 enabled or disabled independently, and use optimistic versioning. The admin
 API initially labelled this state `PERSISTED_NOT_APPLIED`. Snapshot publication,
 activation, enforcement, telemetry, and deployment wiring are defined in ADRs
-0015-0019. The publisher reports
-`DATA_PLANE_UNOBSERVED` because it still has no per-resolver acknowledgement.
+0015-0019. At that phase the publisher reported `DATA_PLANE_UNOBSERVED`
+because it had no per-resolver acknowledgement. ADRs 0026-0029 later add the
+authenticated reporting and fleet-convergence layers without changing this
+persistence boundary.
 
 ## Consequences
 

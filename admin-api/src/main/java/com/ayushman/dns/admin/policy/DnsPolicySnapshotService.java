@@ -45,7 +45,11 @@ public class DnsPolicySnapshotService {
 
     @Transactional
     public DnsPolicyPublicationStatus currentPublicationStatus() {
-        DnsPolicySnapshotStateEntity state = lockedState();
+        DnsPolicySnapshotStateEntity state = stateRepository.findReadLockedById(
+                DnsPolicySnapshotStateEntity.SINGLETON_ID
+        ).orElseThrow(() -> new IllegalStateException(
+                "DNS policy snapshot state is missing"
+        ));
         return new DnsPolicyPublicationStatus(
                 state.getRevision(),
                 state.getPublishedAt(),

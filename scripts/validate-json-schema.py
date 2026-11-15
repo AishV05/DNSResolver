@@ -25,6 +25,7 @@ SUPPORTED_KEYWORDS = {
     "const",
     "pattern",
     "minimum",
+    "maximum",
     "required",
     "properties",
     "additionalProperties",
@@ -159,6 +160,17 @@ def validate(value: Any, contract: Any, root: dict[str, Any], path: str) -> None
             and value < minimum
         ):
             fail(f"{path} is below the schema minimum")
+
+    if "maximum" in contract:
+        maximum = contract["maximum"]
+        if not isinstance(maximum, (int, float)) or isinstance(maximum, bool):
+            fail(f"schema maximum at {path} must be a number")
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > maximum
+        ):
+            fail(f"{path} is above the schema maximum")
 
     if isinstance(value, dict):
         required = contract.get("required", [])

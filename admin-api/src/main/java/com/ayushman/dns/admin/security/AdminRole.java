@@ -7,5 +7,7 @@ public enum AdminRole {
     VIEWER,
     POLICY_EDITOR,
     POLICY_SNAPSHOT_READER,
+    FLEET_METRICS_READER,
+    RESOLVER_AGENT,
     ADMIN
 }

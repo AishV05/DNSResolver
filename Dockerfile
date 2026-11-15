@@ -35,6 +35,8 @@ LABEL org.opencontainers.image.title="DNS Resolver" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
+ENV DNS_APPLICATION_VERSION="${APP_VERSION}"
+
 RUN groupadd --system dns && useradd --system --gid dns --home /app dns
 WORKDIR /app
 COPY --from=build --chown=dns:dns \

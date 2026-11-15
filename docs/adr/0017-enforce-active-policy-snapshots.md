@@ -46,10 +46,11 @@ snapshot changes later decisions immediately without flushing resolver caches:
 blocked requests never reach those caches, while newly allowed requests may
 use legitimate existing cache state.
 
-The Admin API publishes revisions but has no acknowledgement from a DNS
-instance. Its status therefore says `DATA_PLANE_UNOBSERVED`, not `APPLIED` or
-`ENFORCED`. The dedicated policy network and reader-token secret are specified
-separately in ADR 0019.
+At the time of this decision the Admin API published revisions but had no
+acknowledgement from a DNS instance, so its status said
+`DATA_PLANE_UNOBSERVED`, not `APPLIED` or `ENFORCED`. ADRs 0026-0029 later add
+authenticated reporting and bounded convergence. The dedicated policy network
+and reader-token secret are specified separately in ADR 0019.
 
 ## Consequences
 

@@ -25,6 +25,8 @@ public final class MetricsServer implements AutoCloseable {
     private final BooleanSupplier tcpRunning;
     private final Supplier<ServerMetrics.Snapshot> metricsSnapshot;
     private final Supplier<PolicyTelemetry.Snapshot> policySnapshot;
+    private final Supplier<ResolverReportingTelemetry.Snapshot>
+            reportingSnapshot;
 
     public MetricsServer(
             int port,
@@ -53,7 +55,26 @@ public final class MetricsServer implements AutoCloseable {
                 requireServer(dnsServer)::isUdpRunning,
                 requireServer(dnsServer)::isTcpRunning,
                 requireServer(dnsServer).metrics()::snapshot,
-                requireServer(dnsServer)::policyTelemetrySnapshot
+                requireServer(dnsServer)::policyTelemetrySnapshot,
+                () -> ResolverReportingTelemetry.Snapshot.disabled()
+        );
+    }
+
+    public MetricsServer(
+            int port,
+            String bindAddress,
+            DnsServer dnsServer,
+            ResolverFleetReporter fleetReporter
+    ) throws IOException {
+        this(
+                port,
+                bindAddress,
+                requireServer(dnsServer)::isRunning,
+                requireServer(dnsServer)::isUdpRunning,
+                requireServer(dnsServer)::isTcpRunning,
+                requireServer(dnsServer).metrics()::snapshot,
+                requireServer(dnsServer)::policyTelemetrySnapshot,
+                requireReporter(fleetReporter)::telemetrySnapshot
         );
     }
 
@@ -86,7 +107,8 @@ public final class MetricsServer implements AutoCloseable {
                 dnsRunning,
                 dnsRunning,
                 metricsSnapshot,
-                policySnapshot
+                policySnapshot,
+                () -> ResolverReportingTelemetry.Snapshot.disabled()
         );
     }
 
@@ -105,7 +127,8 @@ public final class MetricsServer implements AutoCloseable {
                 udpRunning,
                 tcpRunning,
                 metricsSnapshot,
-                () -> PolicyTelemetry.Snapshot.disabled()
+                () -> PolicyTelemetry.Snapshot.disabled(),
+                () -> ResolverReportingTelemetry.Snapshot.disabled()
         );
     }
 
@@ -117,6 +140,28 @@ public final class MetricsServer implements AutoCloseable {
             BooleanSupplier tcpRunning,
             Supplier<ServerMetrics.Snapshot> metricsSnapshot,
             Supplier<PolicyTelemetry.Snapshot> policySnapshot
+    ) throws IOException {
+        this(
+                port,
+                bindAddress,
+                dnsRunning,
+                udpRunning,
+                tcpRunning,
+                metricsSnapshot,
+                policySnapshot,
+                () -> ResolverReportingTelemetry.Snapshot.disabled()
+        );
+    }
+
+    MetricsServer(
+            int port,
+            String bindAddress,
+            BooleanSupplier dnsRunning,
+            BooleanSupplier udpRunning,
+            BooleanSupplier tcpRunning,
+            Supplier<ServerMetrics.Snapshot> metricsSnapshot,
+            Supplier<PolicyTelemetry.Snapshot> policySnapshot,
+            Supplier<ResolverReportingTelemetry.Snapshot> reportingSnapshot
     ) throws IOException {
 
         if (port < 0 || port > 65_535) {
@@ -135,7 +180,8 @@ public final class MetricsServer implements AutoCloseable {
                 || udpRunning == null
                 || tcpRunning == null
                 || metricsSnapshot == null
-                || policySnapshot == null) {
+                || policySnapshot == null
+                || reportingSnapshot == null) {
             throw new IllegalArgumentException(
                     "metrics dependencies must not be null"
             );
@@ -146,6 +192,7 @@ public final class MetricsServer implements AutoCloseable {
         this.tcpRunning = tcpRunning;
         this.metricsSnapshot = metricsSnapshot;
         this.policySnapshot = policySnapshot;
+        this.reportingSnapshot = reportingSnapshot;
         this.server = HttpServer.create(
                 new InetSocketAddress(
                         InetAddress.getByName(bindAddress),
@@ -197,7 +244,8 @@ public final class MetricsServer implements AutoCloseable {
                 udpRunning.getAsBoolean(),
                 tcpRunning.getAsBoolean(),
                 metricsSnapshot.get(),
-                policySnapshot.get()
+                policySnapshot.get(),
+                reportingSnapshot.get()
         );
         byte[] response = body.getBytes(StandardCharsets.UTF_8);
 
@@ -236,5 +284,16 @@ public final class MetricsServer implements AutoCloseable {
         }
 
         return dnsServer;
+    }
+
+    private static ResolverFleetReporter requireReporter(
+            ResolverFleetReporter reporter
+    ) {
+        if (reporter == null) {
+            throw new IllegalArgumentException(
+                    "fleetReporter must not be null"
+            );
+        }
+        return reporter;
     }
 }

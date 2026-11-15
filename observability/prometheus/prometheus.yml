@@ -7,10 +7,17 @@ rule_files:
   - /etc/prometheus/rules/*.yml
 
 scrape_configs:
-  # This is the only scrape target. The Admin API is intentionally excluded
-  # until it has a separately designed least-privilege metrics endpoint.
   - job_name: dns-server
     metrics_path: /metrics
     static_configs:
       - targets:
           - dns-server:9091
+
+  - job_name: admin-api
+    metrics_path: /api/v1/internal/fleet-metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/fleet-metrics-reader-token
+    static_configs:
+      - targets:
+          - admin-api:8081

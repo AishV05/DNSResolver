@@ -36,9 +36,22 @@ services:
       DNS_POLICY_MAX_BACKOFF_MILLIS: ${DNS_POLICY_MAX_BACKOFF_MILLIS:-30000}
       DNS_POLICY_MAX_RESPONSE_BYTES: ${DNS_POLICY_MAX_RESPONSE_BYTES:-1048576}
       DNS_POLICY_MAX_RULES: ${DNS_POLICY_MAX_RULES:-10000}
+      DNS_REPORTING_MODE: "ENABLED"
+      DNS_REPORTING_CONTROL_PLANE_URL: "http://admin-api:8081"
+      DNS_REPORTING_TOKEN_FILE: "/run/secrets/resolver-agent-token"
+      DNS_REPORTING_ALLOW_INSECURE_HTTP: "true"
+      DNS_REPORTING_CONNECT_TIMEOUT_MILLIS: ${DNS_REPORTING_CONNECT_TIMEOUT_MILLIS:-2000}
+      DNS_REPORTING_REQUEST_TIMEOUT_MILLIS: ${DNS_REPORTING_REQUEST_TIMEOUT_MILLIS:-5000}
+      DNS_REPORTING_INTERVAL_MILLIS: ${DNS_REPORTING_INTERVAL_MILLIS:-30000}
+      DNS_REPORTING_INITIAL_BACKOFF_MILLIS: ${DNS_REPORTING_INITIAL_BACKOFF_MILLIS:-1000}
+      DNS_REPORTING_MAX_BACKOFF_MILLIS: ${DNS_REPORTING_MAX_BACKOFF_MILLIS:-30000}
+      DNS_REPORTING_MAX_RESPONSE_BYTES: ${DNS_REPORTING_MAX_RESPONSE_BYTES:-16384}
     secrets:
       - source: policy-snapshot-reader-token
         target: policy-snapshot-reader-token
+        mode: 0444
+      - source: resolver-agent-token
+        target: resolver-agent-token
         mode: 0444
     depends_on:
       admin-api:
@@ -47,9 +60,10 @@ services:
       - "${DNS_PORT:-5354}:${DNS_PORT:-5354}/udp"
       - "${DNS_PORT:-5354}:${DNS_PORT:-5354}/tcp"
     networks:
-      - dns-network
-      - observability
-      - policy-distribution
+      dns-network:
+        gw_priority: 1
+      observability:
+      policy-distribution:
 
   prometheus:
     image: prom/prometheus:v3.13.1@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
@@ -61,6 +75,10 @@ services:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
+    secrets:
+      - source: fleet-metrics-reader-token
+        target: fleet-metrics-reader-token
+        mode: 0444
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     healthcheck:
@@ -71,6 +89,7 @@ services:
       start_period: 10s
     networks:
       - observability
+      - admin-observability
 
   grafana:
     image: grafana/grafana:12.3.1@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
@@ -126,6 +145,12 @@ services:
       DNS_ADMIN_DB_USERNAME: "${DNS_ADMIN_DB_USERNAME:?Set DNS_ADMIN_DB_USERNAME in config/local.env}"
       DNS_ADMIN_DB_PASSWORD: "${DNS_ADMIN_DB_PASSWORD:?Set DNS_ADMIN_DB_PASSWORD in config/local.env}"
       DNS_ADMIN_DB_POOL_SIZE: "${DNS_ADMIN_DB_POOL_SIZE:-5}"
+      DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS: "${DNS_ADMIN_FLEET_REPORT_FRESHNESS_MILLIS:-120000}"
+      DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED: "${DNS_ADMIN_FLEET_SESSION_RETENTION_ENABLED:-true}"
+      DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS: "${DNS_ADMIN_FLEET_SESSION_RETENTION_MILLIS:-2592000000}"
+      DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS: "${DNS_ADMIN_FLEET_SESSION_CLEANUP_INTERVAL_MILLIS:-3600000}"
+      DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE: "${DNS_ADMIN_FLEET_SESSION_CLEANUP_BATCH_SIZE:-500}"
+      DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN: "${DNS_ADMIN_FLEET_SESSION_CLEANUP_MAX_BATCHES_PER_RUN:-10}"
       DNS_ADMIN_BOOTSTRAP_USERNAME: "${DNS_ADMIN_BOOTSTRAP_USERNAME:-}"
       DNS_ADMIN_BOOTSTRAP_TOKEN: "${DNS_ADMIN_BOOTSTRAP_TOKEN:-}"
     depends_on:
@@ -142,10 +167,15 @@ services:
     networks:
       - control-plane
       - policy-distribution
+      - admin-observability
 
 secrets:
   policy-snapshot-reader-token:
-    file: "${DNS_POLICY_READER_TOKEN_FILE:-./config/policy-snapshot-reader-token}"
+    file: "${DNS_POLICY_READER_TOKEN_FILE:-./config/runtime-secrets/policy-snapshot-reader-token}"
+  resolver-agent-token:
+    file: "${DNS_RESOLVER_AGENT_TOKEN_FILE:-./config/runtime-secrets/resolver-agent-token}"
+  fleet-metrics-reader-token:
+    file: "${DNS_FLEET_METRICS_READER_TOKEN_FILE:-./config/runtime-secrets/fleet-metrics-reader-token}"
 
 volumes:
   postgres-data:
@@ -157,4 +187,6 @@ networks:
   control-plane:
   observability:
   policy-distribution:
+    internal: true
+  admin-observability:
     internal: true

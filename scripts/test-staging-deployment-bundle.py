@@ -358,9 +358,51 @@ def refresh_fixture_integrity(root: Path) -> None:
     )
 
 
-def verify(root: Path) -> subprocess.CompletedProcess[str]:
+def make_pre_fleet_metrics_fixture(root: Path) -> None:
+    compose_path = root / "compose.yaml"
+    compose = compose_path.read_text(encoding="utf-8")
+    for block in (
+        "      - admin-observability\n",
+        "    secrets:\n"
+        "      - source: fleet-metrics-reader-token\n"
+        "        target: fleet-metrics-reader-token\n"
+        "        mode: 0444\n",
+        "  fleet-metrics-reader-token:\n"
+        "    file: \"${STAGING_SECRETS_DIR:?Set STAGING_SECRETS_DIR to the "
+        "root-owned secret directory}/fleet-metrics-reader-token\"\n",
+        "  admin-observability:\n"
+        "    driver: bridge\n"
+        "    internal: true\n",
+    ):
+        if block not in compose:
+            raise AssertionError(f"fixture block is absent: {block!r}")
+        compose = compose.replace(block, "")
+    _write_text(compose_path, compose)
+
+    prometheus_path = root / "observability/prometheus/prometheus.yml"
+    prometheus = prometheus_path.read_text(encoding="utf-8")
+    admin_job = (
+        "\n  - job_name: admin-api\n"
+        "    metrics_path: /api/v1/internal/fleet-metrics\n"
+        "    authorization:\n"
+        "      type: Bearer\n"
+        "      credentials_file: /run/secrets/fleet-metrics-reader-token\n"
+        "    static_configs:\n"
+        "      - targets:\n"
+        "          - admin-api:8081\n"
+    )
+    if admin_job not in prometheus:
+        raise AssertionError("Admin scrape fixture block is absent")
+    _write_text(prometheus_path, prometheus.replace(admin_job, ""))
+    refresh_fixture_integrity(root)
+
+
+def verify(
+    root: Path,
+    contract: str = "current",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(VERIFIER), str(root)],
+        [str(VERIFIER), str(root), "--contract", contract],
         cwd=REPO_ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -383,6 +425,22 @@ class StagingDeploymentBundleTest(unittest.TestCase):
         result = verify(self.root)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Verified staging deployment bundle", result.stdout)
+
+    def test_pre_fleet_metrics_contract_is_narrow_and_explicit(self) -> None:
+        make_pre_fleet_metrics_fixture(self.root)
+        strict_result = verify(self.root)
+        legacy_result = verify(self.root, "pre-fleet-metrics")
+        self.assertNotEqual(strict_result.returncode, 0)
+        self.assertEqual(legacy_result.returncode, 0, legacy_result.stderr)
+
+    def test_pre_fleet_metrics_contract_rejects_partial_wiring(self) -> None:
+        make_pre_fleet_metrics_fixture(self.root)
+        prometheus_path = self.root / "observability/prometheus/prometheus.yml"
+        _copy(REPO_ROOT / "observability/prometheus/prometheus.yml", prometheus_path)
+        refresh_fixture_integrity(self.root)
+        result = verify(self.root, "pre-fleet-metrics")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("partial Admin scrape wiring", result.stderr)
 
     def test_payload_tamper_fails(self) -> None:
         with (self.root / "compose.yaml").open("a", encoding="utf-8") as destination:
@@ -440,6 +498,16 @@ class StagingConfigurationTest(unittest.TestCase):
             "reader-token-0123456789abcdef0123456789abcdef",
             final_newline=False,
         )
+        self._secret(
+            "resolver-agent-token",
+            "agent-token-0123456789abcdef0123456789abcdef",
+            final_newline=False,
+        )
+        self._secret(
+            "fleet-metrics-reader-token",
+            "metrics-token-0123456789abcdef0123456789abcdef",
+            final_newline=False,
+        )
         self.config = self.root / "staging.env"
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
@@ -450,8 +518,10 @@ class StagingConfigurationTest(unittest.TestCase):
 
     def _secret(self, name: str, value: str, *, final_newline: bool = True) -> None:
         path = self.secrets / name
+        if path.exists():
+            path.chmod(0o600)
         _write_text(path, value + ("\n" if final_newline else ""))
-        path.chmod(0o600)
+        path.chmod(0o600 if name == "admin-operator-token" else 0o444)
 
     def _write_config(
         self,
@@ -470,6 +540,19 @@ class StagingConfigurationTest(unittest.TestCase):
             "STAGING_BOOTSTRAP_USERNAME=bootstrap-admin\n",
         )
         self.config.chmod(0o600)
+
+    def _install_current_bundle(self, *, pre_fleet_metrics: bool) -> None:
+        state = self.root / "state"
+        releases = state / "releases"
+        releases.mkdir(parents=True, mode=0o700)
+        state.chmod(0o700)
+        release_key = f"{TAG}-{COMMIT}"
+        retained = releases / release_key
+        shutil.copytree(self.bundle, retained)
+        if pre_fleet_metrics:
+            make_pre_fleet_metrics_fixture(retained)
+        _write_text(state / "current", release_key + "\n")
+        (state / "current").chmod(0o600)
 
     def _write_fake_docker(self) -> None:
         images = [
@@ -517,6 +600,8 @@ class StagingConfigurationTest(unittest.TestCase):
     def test_bootstrap_preflight_uses_separate_bootstrap_token(self) -> None:
         (self.secrets / "admin-operator-token").unlink()
         (self.secrets / "policy-snapshot-reader-token").unlink()
+        (self.secrets / "resolver-agent-token").unlink()
+        (self.secrets / "fleet-metrics-reader-token").unlink()
         self._write_config()
         result = self._preflight("--bootstrap")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -532,6 +617,78 @@ class StagingConfigurationTest(unittest.TestCase):
         self._secret(
             "policy-snapshot-reader-token",
             "reader-token-0123456789abcdef0123456789abcdef",
+        )
+        self._write_config()
+        result = self._preflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("trailing line ending", result.stderr)
+
+    def test_normal_preflight_requires_resolver_agent_token(self) -> None:
+        (self.secrets / "resolver-agent-token").unlink()
+        self._write_config()
+        result = self._preflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resolver-agent-token", result.stderr)
+
+    def test_normal_preflight_requires_fleet_metrics_token(self) -> None:
+        (self.secrets / "fleet-metrics-reader-token").unlink()
+        self._write_config()
+        result = self._preflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fleet-metrics-reader-token", result.stderr)
+
+    def test_fleet_metrics_upgrade_preflight_allows_only_missing_new_token(self) -> None:
+        (self.secrets / "fleet-metrics-reader-token").unlink()
+        self._install_current_bundle(pre_fleet_metrics=True)
+        self._write_config()
+        result = self._preflight("--initialize-fleet-metrics")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fleet_metrics_upgrade_requires_a_legacy_current_release(self) -> None:
+        (self.secrets / "fleet-metrics-reader-token").unlink()
+        self._write_config()
+        result = self._preflight("--initialize-fleet-metrics")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recorded current release", result.stderr)
+
+    def test_fleet_metrics_upgrade_rejects_current_contract_release(self) -> None:
+        (self.secrets / "fleet-metrics-reader-token").unlink()
+        self._install_current_bundle(pre_fleet_metrics=False)
+        self._write_config()
+        result = self._preflight("--initialize-fleet-metrics")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy staging Compose", result.stderr)
+
+    def test_fleet_metrics_upgrade_still_rejects_invalid_existing_token(self) -> None:
+        self._secret("fleet-metrics-reader-token", "too-short")
+        self._write_config()
+        result = self._preflight("--initialize-fleet-metrics")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fleet-metrics-reader-token", result.stderr)
+
+    def test_fleet_metrics_upgrade_and_bootstrap_are_mutually_exclusive(self) -> None:
+        self._write_config()
+        result = self._preflight(
+            "--bootstrap",
+            "--initialize-fleet-metrics",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mutually exclusive", result.stderr)
+
+    def test_fleet_metrics_token_rejects_trailing_newline(self) -> None:
+        self._secret(
+            "fleet-metrics-reader-token",
+            "metrics-token-0123456789abcdef0123456789abcdef",
+        )
+        self._write_config()
+        result = self._preflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("trailing line ending", result.stderr)
+
+    def test_resolver_agent_token_rejects_trailing_newline(self) -> None:
+        self._secret(
+            "resolver-agent-token",
+            "agent-token-0123456789abcdef0123456789abcdef",
         )
         self._write_config()
         result = self._preflight()
@@ -560,6 +717,13 @@ class StagingConfigurationTest(unittest.TestCase):
         result = self._preflight()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("control characters", result.stderr)
+
+    def test_container_secret_must_be_readable_by_non_root_service(self) -> None:
+        (self.secrets / "resolver-agent-token").chmod(0o600)
+        self._write_config()
+        result = self._preflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mode 0444", result.stderr)
 
     def test_broad_state_directory_is_rejected_before_chmod(self) -> None:
         self._write_config(state_directory=Path("/"))
