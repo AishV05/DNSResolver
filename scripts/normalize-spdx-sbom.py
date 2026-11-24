@@ -25,6 +25,7 @@ SYFT_VERSION = "1.51.1"
 MAX_ATTESTATION_BYTES = 16 * 1024 * 1024
 CANONICAL_SOURCE = "https://github.com/AishV05/DNSResolver"
 DIGEST = re.compile(r"sha256:([a-f0-9]{64})")
+SPDX_ELEMENT_ID = re.compile(r"SPDXRef-[A-Za-z0-9.-]+")
 COMPONENTS = {"admin-api", "dns-server"}
 
 
@@ -67,6 +68,13 @@ def require_nonempty_string(value: Any, context: str) -> str:
     return value
 
 
+def require_spdx_element_id(value: Any, context: str) -> str:
+    identifier = require_nonempty_string(value, context)
+    if SPDX_ELEMENT_ID.fullmatch(identifier) is None:
+        raise ContractError(f"{context} is not a valid SPDX element ID")
+    return identifier
+
+
 def validate_inventory(document: dict[str, Any]) -> None:
     if document.get("spdxVersion") != SPDX_VERSION:
         raise ContractError(f"spdxVersion must be {SPDX_VERSION}")
@@ -90,43 +98,87 @@ def validate_inventory(document: dict[str, Any]) -> None:
     packages = document.get("packages")
     if not isinstance(packages, list) or not packages:
         raise ContractError("packages must be a non-empty array")
-    package_ids: set[str] = set()
-    for index, package in enumerate(packages):
-        if not isinstance(package, dict):
-            raise ContractError(f"package {index} must be an object")
-        require_nonempty_string(package.get("name"), f"package {index} name")
-        package_id = require_nonempty_string(
-            package.get("SPDXID"), f"package {index} SPDXID"
-        )
-        if package_id in package_ids:
-            raise ContractError(f"duplicate package SPDXID: {package_id}")
-        package_ids.add(package_id)
+    inventory_ids: set[str] = set()
+    for collection_name in ("packages", "files", "snippets"):
+        collection = document.get(collection_name, [])
+        if not isinstance(collection, list):
+            raise ContractError(f"{collection_name} must be an array")
+        singular = collection_name[:-1]
+        for index, element in enumerate(collection):
+            if not isinstance(element, dict):
+                raise ContractError(f"{singular} {index} must be an object")
+            if collection_name == "packages":
+                require_nonempty_string(element.get("name"), f"package {index} name")
+            element_id = require_spdx_element_id(
+                element.get("SPDXID"), f"{singular} {index} SPDXID"
+            )
+            if element_id == "SPDXRef-DOCUMENT":
+                raise ContractError(
+                    f"{singular} {index} SPDXID collides with the document SPDXID"
+                )
+            if element_id in inventory_ids:
+                raise ContractError(f"duplicate inventory SPDXID: {element_id}")
+            inventory_ids.add(element_id)
 
     described = document.get("documentDescribes")
-    has_document_describes = (
-        isinstance(described, list)
-        and bool(described)
-        and all(isinstance(item, str) and item for item in described)
-    )
+    has_document_describes = False
+    if described is not None:
+        if not isinstance(described, list) or not described:
+            raise ContractError("documentDescribes must be a non-empty array")
+        described_ids: set[str] = set()
+        for index, value in enumerate(described):
+            described_id = require_spdx_element_id(
+                value, f"documentDescribes entry {index}"
+            )
+            if described_id in described_ids:
+                raise ContractError(f"duplicate documentDescribes entry: {described_id}")
+            if described_id not in inventory_ids:
+                raise ContractError(
+                    f"documentDescribes references an unknown SPDX element: {described_id}"
+                )
+            described_ids.add(described_id)
+        has_document_describes = True
+
     relationships = document.get("relationships")
     has_describes_relationship = False
-    if isinstance(relationships, list):
-        for relationship in relationships:
-            if (
-                isinstance(relationship, dict)
-                and relationship.get("spdxElementId") == "SPDXRef-DOCUMENT"
-                and relationship.get("relationshipType") == "DESCRIBES"
-                and isinstance(relationship.get("relatedSpdxElement"), str)
-                and relationship["relatedSpdxElement"]
-            ):
+    if relationships is not None:
+        if not isinstance(relationships, list):
+            raise ContractError("relationships must be an array")
+        for index, relationship in enumerate(relationships):
+            if not isinstance(relationship, dict):
+                raise ContractError(f"relationship {index} must be an object")
+            source_id = require_nonempty_string(
+                relationship.get("spdxElementId"),
+                f"relationship {index} spdxElementId",
+            )
+            relationship_type = require_nonempty_string(
+                relationship.get("relationshipType"),
+                f"relationship {index} relationshipType",
+            )
+            target_id = require_nonempty_string(
+                relationship.get("relatedSpdxElement"),
+                f"relationship {index} relatedSpdxElement",
+            )
+            if source_id == "SPDXRef-DOCUMENT" and relationship_type == "DESCRIBES":
+                require_spdx_element_id(
+                    target_id, f"relationship {index} relatedSpdxElement"
+                )
+                if target_id not in inventory_ids:
+                    raise ContractError(
+                        "document DESCRIBES relationship references an unknown "
+                        f"SPDX element: {target_id}"
+                    )
                 has_describes_relationship = True
-                break
     if not has_document_describes and not has_describes_relationship:
         raise ContractError("document must describe at least one SPDX element")
 
 
 def normalized_timestamp(commit_timestamp: int) -> str:
-    if isinstance(commit_timestamp, bool) or commit_timestamp < 0:
+    if (
+        not isinstance(commit_timestamp, int)
+        or isinstance(commit_timestamp, bool)
+        or commit_timestamp < 0
+    ):
         raise ContractError("commit timestamp must be a non-negative integer")
     try:
         return datetime.fromtimestamp(commit_timestamp, timezone.utc).strftime(

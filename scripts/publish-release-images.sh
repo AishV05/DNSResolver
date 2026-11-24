@@ -122,7 +122,61 @@ inspect_reference() {
         return 0
     fi
 
-    if grep -Eiq 'manifest unknown|name unknown|not found' "${error_file}"; then
+    if python3 - "${reference}" "${error_file}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+reference = sys.argv[1].lower()
+try:
+    lines = [
+        line.strip().lower()
+        for line in Path(sys.argv[2]).read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+        if line.strip()
+    ]
+except OSError:
+    raise SystemExit(1)
+
+# A mixed diagnostic can contain both an absence phrase and an authentication or
+# transport failure. Treat only one well-formed registry diagnostic as absence;
+# every other shape fails closed before any tag is written.
+if len(lines) != 1:
+    raise SystemExit(1)
+
+line = lines[0]
+known_absence_messages = {
+    "manifest unknown",
+    "manifest unknown: manifest unknown",
+    "manifest unknown: requested manifest does not exist",
+    "name unknown",
+    "name unknown: name unknown",
+    "name unknown: repository does not exist",
+    "name unknown: repository name not known to registry",
+}
+without_error_prefix = re.sub(r"^error:\s*", "", line, count=1)
+if without_error_prefix in known_absence_messages:
+    raise SystemExit(0)
+if re.fullmatch(rf"(?:error:\s*)?{re.escape(reference)}:\s*not found", line):
+    raise SystemExit(0)
+
+if "@" in reference:
+    repository, manifest_ref = reference.rsplit("@", 1)
+else:
+    repository, manifest_ref = reference.rsplit(":", 1)
+registry, repository_path = repository.split("/", 1)
+manifest_url = f"https://{registry}/v2/{repository_path}/manifests/{manifest_ref}"
+url_404 = (
+    rf'(?:error:\s*)?unexpected status from head request to '
+    rf'"?{re.escape(manifest_url)}"?:\s*404\s+not\s+found'
+)
+if re.fullmatch(url_404, line):
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+    then
         rm -f -- "${output_file}" "${raw_file}" "${error_file}"
         return 1
     fi

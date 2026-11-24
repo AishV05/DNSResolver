@@ -134,6 +134,8 @@ expected_images = [
         "dnsadmin",
         "/app/dns-admin-api.jar",
         "8081/tcp",
+        "DNS_ADMIN_BIND_ADDRESS",
+        "0.0.0.0",
     ),
     (
         "dns-server",
@@ -142,6 +144,8 @@ expected_images = [
         "dns",
         "/app/dns-resolver.jar",
         ("5354/tcp", "5354/udp"),
+        "DNS_APPLICATION_VERSION",
+        version,
     ),
 ]
 images = manifest["images"]
@@ -272,7 +276,16 @@ if remote:
         fail("remote verification requires Docker Buildx")
 
     for image, expected in zip(images, expected_images):
-        component, repository, title, user, entrypoint, exposed_port = expected
+        (
+            component,
+            repository,
+            title,
+            user,
+            entrypoint,
+            exposed_port,
+            expected_environment_name,
+            expected_environment_value,
+        ) = expected
         digest = image["digest"]
         references = [
             f"{repository}@{digest}",
@@ -329,6 +342,24 @@ if remote:
         )
         if not isinstance(ports, dict) or set(ports) != expected_ports:
             fail(f"{component} remote image exposes an unexpected port set")
+        environment = config.get("Env")
+        if not isinstance(environment, list) or not all(
+            isinstance(item, str) and "=" in item for item in environment
+        ):
+            fail(f"{component} remote image environment is malformed")
+        environment_values = {}
+        for item in environment:
+            name, value = item.split("=", 1)
+            if not name:
+                fail(f"{component} remote image environment is malformed")
+            if name in environment_values:
+                fail(f"{component} remote image environment contains duplicate {name}")
+            environment_values[name] = value
+        if environment_values.get(expected_environment_name) != expected_environment_value:
+            fail(
+                f"{component} remote image {expected_environment_name} differs from "
+                "the release runtime contract"
+            )
 
 print(
     f"Container publication manifest verified: {tag} ({commit})"

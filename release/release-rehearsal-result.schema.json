@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform first-release rehearsal result",
+  "description": "A non-publishing local rehearsal result. It is not an overall release go/no-go decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "scope",
+    "status",
+    "version",
+    "tag",
+    "source",
+    "workflowRunId",
+    "workflowRunAttempt",
+    "bundleChecksumsSha256",
+    "checks",
+    "externalControls"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "scope": {
+      "const": "local-non-publishing"
+    },
+    "status": {
+      "const": "local-rehearsal-passed"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      }
+    },
+    "workflowRunId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "workflowRunAttempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "bundleChecksumsSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/repositoryCheck"
+        },
+        {
+          "$ref": "#/$defs/mavenCheck"
+        },
+        {
+          "$ref": "#/$defs/composeCheck"
+        },
+        {
+          "$ref": "#/$defs/bundleCheck"
+        }
+      ],
+      "items": false
+    },
+    "externalControls": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/releaseImmutabilityControl"
+        },
+        {
+          "$ref": "#/$defs/releaseEnvironmentsControl"
+        },
+        {
+          "$ref": "#/$defs/rulesetsControl"
+        },
+        {
+          "$ref": "#/$defs/actionsPolicyControl"
+        },
+        {
+          "$ref": "#/$defs/ghcrControl"
+        },
+        {
+          "$ref": "#/$defs/attestationControl"
+        },
+        {
+          "$ref": "#/$defs/stagingEnvironmentControl"
+        },
+        {
+          "$ref": "#/$defs/stagingHostControl"
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "passedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "status": {
+          "const": "passed"
+        }
+      }
+    },
+    "repositoryCheck": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/passedCheck"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "repository-identity"
+            }
+          }
+        }
+      ]
+    },
+    "mavenCheck": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/passedCheck"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "maven-verify"
+            }
+          }
+        }
+      ]
+    },
+    "composeCheck": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/passedCheck"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "compose-validation"
+            }
+          }
+        }
+      ]
+    },
+    "bundleCheck": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/passedCheck"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "deterministic-release-bundle"
+            }
+          }
+        }
+      ]
+    },
+    "unverifiedControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "status": {
+          "const": "unverified"
+        }
+      }
+    },
+    "releaseImmutabilityControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "release-immutability"
+            }
+          }
+        }
+      ]
+    },
+    "releaseEnvironmentsControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "release-environment-protections"
+            }
+          }
+        }
+      ]
+    },
+    "rulesetsControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "branch-and-tag-rulesets"
+            }
+          }
+        }
+      ]
+    },
+    "actionsPolicyControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "actions-token-policy"
+            }
+          }
+        }
+      ]
+    },
+    "ghcrControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "ghcr-alias-absence-and-access"
+            }
+          }
+        }
+      ]
+    },
+    "attestationControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "attestation-plan-eligibility"
+            }
+          }
+        }
+      ]
+    },
+    "stagingEnvironmentControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "staging-environment-and-runner"
+            }
+          }
+        }
+      ]
+    },
+    "stagingHostControl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unverifiedControl"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "staging-host-network-secrets-and-backups"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

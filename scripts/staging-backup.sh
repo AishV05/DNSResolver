@@ -38,6 +38,8 @@ if [[ "${PRE_FLEET_METRICS_UPGRADE}" == true \
     staging_fail '--pre-fleet-metrics-upgrade requires an inherited deployment lock'
 fi
 
+staging_reject_inherited_container_controls
+
 for command in docker python3 date flock grep sed; do
     staging_require_command "${command}"
 done

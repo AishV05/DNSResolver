@@ -29,6 +29,8 @@ if [[ $# -eq 3 ]]; then
     esac
 fi
 
+staging_reject_inherited_container_controls
+
 for command in docker python3 flock cmp grep sed sort; do
     staging_require_command "${command}"
 done
@@ -41,13 +43,6 @@ staging_resolve_inputs \
     "${USE_BOOTSTRAP}" \
     true \
     "${INITIALIZE_FLEET_METRICS}"
-staging_verify_host_bind_address
-server_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" \
-    || staging_fail 'cannot query Docker Engine platform'
-[[ "${server_platform}" == linux/amd64 ]] \
-    || staging_fail "staging Docker Engine must be linux/amd64; got ${server_platform}"
-staging_compose config --quiet
-staging_validate_compose_images
 
 staging_prepare_private_directory "${STAGING_CFG_STATE_DIR}" 'state'
 staging_prepare_private_directory "${STAGING_CFG_STATE_DIR}/releases" 'release state'
@@ -59,6 +54,29 @@ target_tag="$(printf '%s\n' "${identity}" | sed -n '1p')"
 target_commit="$(printf '%s\n' "${identity}" | sed -n '2p')"
 release_key="${target_tag}-${target_commit}"
 target_state_bundle="${STAGING_CFG_STATE_DIR}/releases/${release_key}"
+
+current_file="${STAGING_CFG_STATE_DIR}/current"
+previous_key=''
+previous_bundle=''
+if [[ -e "${current_file}" || -L "${current_file}" ]]; then
+    [[ -f "${current_file}" && ! -L "${current_file}" ]] \
+        || staging_fail 'current deployment state must be a regular non-symlink file'
+    previous_key="$(staging_read_current_release "${current_file}")" \
+        || staging_fail 'current deployment state contains an invalid release identity'
+    staging_require_forward_promotion \
+        "${target_tag}" "${target_commit}" "${previous_key}"
+    previous_bundle="${STAGING_CFG_STATE_DIR}/releases/${previous_key}"
+elif [[ -n "$(staging_compose ps --all --quiet)" ]]; then
+    staging_fail 'staging containers exist without an applied-state record'
+fi
+
+staging_verify_host_bind_address
+server_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" \
+    || staging_fail 'cannot query Docker Engine platform'
+[[ "${server_platform}" == linux/amd64 ]] \
+    || staging_fail "staging Docker Engine must be linux/amd64; got ${server_platform}"
+staging_compose config --quiet
+staging_validate_compose_images
 
 if [[ -e "${target_state_bundle}" || -L "${target_state_bundle}" ]]; then
     [[ -d "${target_state_bundle}" && ! -L "${target_state_bundle}" ]] \
@@ -97,15 +115,7 @@ else
     trap - EXIT INT TERM
 fi
 
-current_file="${STAGING_CFG_STATE_DIR}/current"
-previous_key=''
-previous_bundle=''
-if [[ -e "${current_file}" || -L "${current_file}" ]]; then
-    [[ -f "${current_file}" && ! -L "${current_file}" ]] \
-        || staging_fail 'current deployment state must be a regular non-symlink file'
-    previous_key="$(staging_read_current_release "${current_file}")" \
-        || staging_fail 'current deployment state contains an invalid release identity'
-    previous_bundle="${STAGING_CFG_STATE_DIR}/releases/${previous_key}"
+if [[ -n "${previous_bundle}" ]]; then
     if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
         "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" \
             "${previous_bundle}" \
@@ -113,8 +123,6 @@ if [[ -e "${current_file}" || -L "${current_file}" ]]; then
     else
         "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" "${previous_bundle}"
     fi
-elif [[ -n "$(staging_compose ps --all --quiet)" ]]; then
-    staging_fail 'staging containers exist without an applied-state record'
 fi
 
 if [[ "${USE_BOOTSTRAP}" == true && -n "${previous_bundle}" ]]; then

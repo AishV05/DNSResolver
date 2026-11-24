@@ -90,10 +90,30 @@ jobs:
       - name: Validate tracked configuration
         run: ./scripts/validate-compose.sh
 
-      - name: Rebuild and verify the release bundle
+      - name: Build first isolated publication bundle
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+        run: |
+          ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+          mv dist "${RUNNER_TEMP}/publication-bundle-first"
+
+      - name: Rebuild and compare the publication bundle
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+          first="${RUNNER_TEMP}/publication-bundle-first"
+          for file in SHA256SUMS release-manifest.json \
+              "admin-api-${RELEASE_TAG#v}.jar" \
+              "dns-server-${RELEASE_TAG#v}.jar"; do
+            if ! cmp --silent "${first}/${file}" "dist/${file}"; then
+              printf 'Publication bundle reproducibility mismatch: %s\n' \
+                "${file}" >&2
+              exit 1
+            fi
+          done
 
       - name: Build exact linux/amd64 release images
         shell: bash
@@ -189,7 +209,9 @@ jobs:
 
   publish-release-images:
     name: Publish release images
-    needs: prepare-release-images
+    needs:
+      - prepare-release-images
+      - confirm-release-verification
     if: github.repository == 'AishV05/DNSResolver'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -490,6 +512,12 @@ jobs:
           name: ${{ needs.record-publication.outputs.sbom_artifact_name }}
           path: ${{ runner.temp }}/image-sboms
 
+      - name: Download the verified publication receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.record-publication.outputs.receipt_artifact_name }}
+          path: ${{ runner.temp }}/container-publication
+
       - name: Verify the unprivileged evidence handoff
         shell: bash
         env:
@@ -501,6 +529,7 @@ jobs:
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/image-sboms"
+          receipt_dir="${RUNNER_TEMP}/container-publication"
           [[ "${EXPECTED_CHECKSUM_DIGEST}" =~ ^[a-f0-9]{64}$ ]]
           printf '%s  %s\n' "${EXPECTED_CHECKSUM_DIGEST}" \
             "${evidence}/SHA256SUMS" | sha256sum --check --strict -
@@ -508,15 +537,71 @@ jobs:
             cd "${evidence}"
             sha256sum --check --strict SHA256SUMS
           )
+          (
+            cd "${receipt_dir}"
+            sha256sum --check --strict container-publication-manifest.json.sha256
+          )
           python3 - \
-            "${evidence}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+            "${evidence}" "${receipt_dir}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
             "${ADMIN_DIGEST}" "${DNS_DIGEST}" <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
           import json
           from pathlib import Path
           import re
           import sys
 
           evidence = Path(sys.argv[1])
+          receipt_dir = Path(sys.argv[2])
+          release_tag = sys.argv[3]
+          source_commit = sys.argv[4]
+          canonical_source = "https://github.com/AishV05/DNSResolver"
+          digest_pattern = re.compile(r"sha256:[a-f0-9]{64}")
+          spdx_id_pattern = re.compile(r"SPDXRef-[A-Za-z0-9.-]+")
+
+
+          def fail(message):
+              raise SystemExit(f"Attestation input rejected: {message}")
+
+
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      fail(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+
+          def load_json(path):
+              raw = path.read_bytes()
+              if not raw.endswith(b"\n") or raw.endswith(b"\n\n") or b"\r" in raw:
+                  fail(f"{path.name} must use LF and exactly one final newline")
+              try:
+                  value = json.loads(
+                      raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  fail(f"{path.name} is not valid UTF-8 JSON: {error}")
+              if not isinstance(value, dict):
+                  fail(f"{path.name} root must be an object")
+              canonical = (
+                  json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+              ).encode("utf-8")
+              if raw != canonical:
+                  fail(f"{path.name} is not canonically serialized")
+              return value, raw
+
+
+          def sha256(raw):
+              return hashlib.sha256(raw).hexdigest()
+
+
+          def require_exact_keys(value, keys, context):
+              if not isinstance(value, dict) or set(value) != set(keys):
+                  fail(f"{context} has an unexpected shape")
+
+
           expected_files = {
               "SHA256SUMS",
               "admin-api.spdx.json",
@@ -525,32 +610,224 @@ jobs:
           }
           entries = list(evidence.iterdir())
           if {entry.name for entry in entries} != expected_files:
-              raise SystemExit("Attestation input contains a missing or unexpected file")
+              fail("SBOM bundle contains a missing or unexpected file")
           if any(entry.is_symlink() or not entry.is_file() for entry in entries):
-              raise SystemExit("Attestation input contains a non-regular file")
-          manifest = json.loads(
-              (evidence / "image-sbom-manifest.json").read_text(encoding="utf-8")
-          )
-          if manifest.get("tag") != sys.argv[2]:
-              raise SystemExit("Attestation input tag differs from the workflow tag")
-          if manifest.get("source", {}).get("commit") != sys.argv[3]:
-              raise SystemExit("Attestation input commit differs from the workflow commit")
-          images = manifest.get("images")
-          if not isinstance(images, list) or len(images) != 2:
-              raise SystemExit("Attestation input must describe exactly two images")
-          expected = [
-              ("admin-api", "ghcr.io/aishv05/dns-admin-api", sys.argv[4]),
-              ("dns-server", "ghcr.io/aishv05/dns-resolver", sys.argv[5]),
+              fail("SBOM bundle contains a non-regular file")
+
+          receipt_entries = list(receipt_dir.iterdir())
+          expected_receipt_files = {
+              "container-publication-manifest.json",
+              "container-publication-manifest.json.sha256",
+          }
+          if {entry.name for entry in receipt_entries} != expected_receipt_files:
+              fail("publication receipt bundle contains a missing or unexpected file")
+          if any(entry.is_symlink() or not entry.is_file() for entry in receipt_entries):
+              fail("publication receipt bundle contains a non-regular file")
+
+          checksum_path = evidence / "SHA256SUMS"
+          checksum_raw = checksum_path.read_bytes()
+          if not checksum_raw.endswith(b"\n") or b"\r" in checksum_raw:
+              fail("SHA256SUMS must use LF and a final newline")
+          checksum_files = [
+              "admin-api.spdx.json",
+              "dns-server.spdx.json",
+              "image-sbom-manifest.json",
           ]
-          for image, identity in zip(images, expected):
-              component, repository, digest = identity
+          expected_checksum_lines = [
+              f"{sha256((evidence / name).read_bytes())}  {name}"
+              for name in checksum_files
+          ]
+          if checksum_raw.decode("ascii").splitlines() != expected_checksum_lines:
+              fail("SHA256SUMS differs from the exact evidence inventory")
+
+          receipt_path = receipt_dir / "container-publication-manifest.json"
+          receipt, receipt_raw = load_json(receipt_path)
+          receipt_checksum = (
+              receipt_dir / "container-publication-manifest.json.sha256"
+          ).read_bytes()
+          expected_receipt_checksum = (
+              f"{sha256(receipt_raw)}  container-publication-manifest.json\n"
+          ).encode("ascii")
+          if receipt_checksum != expected_receipt_checksum:
+              fail("publication receipt checksum file is not exact")
+
+          manifest, _ = load_json(evidence / "image-sbom-manifest.json")
+          require_exact_keys(
+              receipt,
+              ("schemaVersion", "project", "version", "tag", "source", "platform", "images"),
+              "publication receipt",
+          )
+          require_exact_keys(
+              manifest,
+              (
+                  "schemaVersion",
+                  "project",
+                  "version",
+                  "tag",
+                  "source",
+                  "tool",
+                  "publicationReceipt",
+                  "images",
+              ),
+              "SBOM manifest",
+          )
+          if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", release_tag) is None:
+              fail("workflow release tag is invalid")
+          version = release_tag[1:]
+          expected_source = {"repository": canonical_source, "commit": source_commit}
+          if (
+              receipt.get("schemaVersion") != 1
+              or receipt.get("project") != "dns-platform"
+              or receipt.get("version") != version
+              or receipt.get("tag") != release_tag
+              or receipt.get("source") != expected_source
+              or receipt.get("platform") != "linux/amd64"
+          ):
+              fail("publication receipt identity differs from the workflow")
+          source = manifest.get("source")
+          require_exact_keys(
+              source, ("repository", "commit", "commitTimestamp"), "SBOM source"
+          )
+          commit_timestamp = source.get("commitTimestamp")
+          if (
+              manifest.get("schemaVersion") != 1
+              or manifest.get("project") != "dns-platform"
+              or manifest.get("version") != version
+              or manifest.get("tag") != release_tag
+              or source.get("repository") != canonical_source
+              or source.get("commit") != source_commit
+              or type(commit_timestamp) is not int
+              or commit_timestamp < 0
+              or manifest.get("tool")
+              != {"name": "syft", "version": "1.51.1", "spdxVersion": "SPDX-2.3"}
+              or manifest.get("publicationReceipt")
+              != {
+                  "filename": "container-publication-manifest.json",
+                  "sha256": sha256(receipt_raw),
+              }
+          ):
+              fail("SBOM manifest identity differs from the verified release")
+          try:
+              expected_created = datetime.fromtimestamp(
+                  commit_timestamp, timezone.utc
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
+          except (OverflowError, OSError, ValueError):
+              fail("SBOM commit timestamp is out of range")
+
+          images = manifest.get("images")
+          receipt_images = receipt.get("images")
+          if (
+              not isinstance(images, list)
+              or len(images) != 2
+              or not isinstance(receipt_images, list)
+              or len(receipt_images) != 2
+          ):
+              fail("release evidence must describe exactly two images")
+          expected = [
+              (
+                  "admin-api",
+                  "ghcr.io/aishv05/dns-admin-api",
+                  sys.argv[5],
+                  "admin-api.spdx.json",
+              ),
+              (
+                  "dns-server",
+                  "ghcr.io/aishv05/dns-resolver",
+                  sys.argv[6],
+                  "dns-server.spdx.json",
+              ),
+          ]
+          for image, receipt_image, identity in zip(images, receipt_images, expected):
+              component, repository, digest, filename = identity
+              require_exact_keys(
+                  receipt_image,
+                  ("component", "repository", "digest", "tags"),
+                  f"publication image {component}",
+              )
+              expected_tags = {
+                  "version": version,
+                  "sourceCommit": f"sha-{source_commit}",
+              }
+              if (
+                  receipt_image.get("component") != component
+                  or receipt_image.get("repository") != repository
+                  or receipt_image.get("digest") != digest
+                  or receipt_image.get("tags") != expected_tags
+                  or digest_pattern.fullmatch(digest) is None
+              ):
+                  fail(f"publication image identity differs for {component}")
+              require_exact_keys(
+                  image,
+                  ("component", "repository", "digest", "sbom"),
+                  f"SBOM image {component}",
+              )
+              descriptor = image.get("sbom")
+              require_exact_keys(
+                  descriptor, ("filename", "sha256"), f"SBOM descriptor {component}"
+              )
+              sbom_path = evidence / filename
+              sbom, sbom_raw = load_json(sbom_path)
               if (
                   image.get("component") != component
                   or image.get("repository") != repository
                   or image.get("digest") != digest
-                  or re.fullmatch(r"sha256:[a-f0-9]{64}", digest) is None
+                  or descriptor.get("filename") != filename
+                  or descriptor.get("sha256") != sha256(sbom_raw)
               ):
-                  raise SystemExit(f"Attestation image identity differs for {component}")
+                  fail(f"SBOM binding differs for {component}")
+
+              expected_namespace = (
+                  f"{canonical_source}/sbom/spdx-2.3/syft-1.51.1/"
+                  f"{component}/{digest.removeprefix('sha256:')}"
+              )
+              creation = sbom.get("creationInfo")
+              packages = sbom.get("packages")
+              if (
+                  sbom.get("spdxVersion") != "SPDX-2.3"
+                  or sbom.get("dataLicense") != "CC0-1.0"
+                  or sbom.get("SPDXID") != "SPDXRef-DOCUMENT"
+                  or sbom.get("name") != f"{repository}@{digest}"
+                  or sbom.get("documentNamespace") != expected_namespace
+                  or not isinstance(creation, dict)
+                  or creation.get("created") != expected_created
+                  or not isinstance(creation.get("creators"), list)
+                  or "Tool: syft-1.51.1" not in creation.get("creators")
+                  or not isinstance(packages, list)
+                  or not packages
+              ):
+                  fail(f"SPDX identity or inventory is invalid for {component}")
+
+              inventory_ids = set()
+              for collection_name in ("packages", "files", "snippets"):
+                  collection = sbom.get(collection_name, [])
+                  if not isinstance(collection, list):
+                      fail(f"SPDX {collection_name} is invalid for {component}")
+                  for element in collection:
+                      if not isinstance(element, dict):
+                          fail(f"SPDX {collection_name} entry is invalid for {component}")
+                      element_id = element.get("SPDXID")
+                      if (
+                          not isinstance(element_id, str)
+                          or spdx_id_pattern.fullmatch(element_id) is None
+                          or element_id == "SPDXRef-DOCUMENT"
+                          or element_id in inventory_ids
+                      ):
+                          fail(f"SPDX inventory ID is invalid for {component}")
+                      inventory_ids.add(element_id)
+              described = sbom.get("documentDescribes", [])
+              relationships = sbom.get("relationships", [])
+              described_ids = set(described) if isinstance(described, list) else set()
+              if not isinstance(relationships, list):
+                  fail(f"SPDX relationships are invalid for {component}")
+              for relationship in relationships:
+                  if (
+                      isinstance(relationship, dict)
+                      and relationship.get("spdxElementId") == "SPDXRef-DOCUMENT"
+                      and relationship.get("relationshipType") == "DESCRIBES"
+                  ):
+                      described_ids.add(relationship.get("relatedSpdxElement"))
+              if not described_ids or not described_ids.issubset(inventory_ids):
+                  fail(f"SPDX described inventory is invalid for {component}")
           PY
 
       - name: Log in to GHCR for OCI attestation writes
@@ -706,9 +983,7 @@ jobs:
 
   confirm-release-verification:
     name: Confirm deterministic release verification
-    needs:
-      - prepare-release-images
-      - verify-release-evidence
+    needs: prepare-release-images
     if: github.repository == 'AishV05/DNSResolver'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -744,7 +1019,22 @@ jobs:
           from pathlib import Path
           import sys
 
-          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+
+          try:
+              value = json.loads(
+                  Path(sys.argv[1]).read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicate_keys,
+              )
+          except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+              raise SystemExit(f"Release verify query returned invalid JSON: {error}")
           repository, tag, commit = sys.argv[2:]
           runs = value.get("workflow_runs") if isinstance(value, dict) else None
           if not isinstance(runs, list):
@@ -823,6 +1113,7 @@ jobs:
     needs:
       - prepare-release-images
       - record-publication
+      - verify-release-evidence
       - confirm-release-verification
     if: github.repository == 'AishV05/DNSResolver'
     runs-on: ubuntu-24.04
@@ -1003,7 +1294,22 @@ jobs:
           from pathlib import Path
           import sys
 
-          run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+
+          try:
+              run = json.loads(
+                  Path(sys.argv[1]).read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicate_keys,
+              )
+          except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+              raise SystemExit(f"Release verify run returned invalid JSON: {error}")
           repository, tag, commit, run_id, run_attempt = sys.argv[2:]
           source_repo = run.get("repository") if isinstance(run, dict) else None
           head_repo = run.get("head_repository") if isinstance(run, dict) else None
@@ -1029,6 +1335,7 @@ jobs:
       - name: Verify the write-boundary handoff
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_CHECKSUMS_SHA256: ${{ needs.prepare-github-release-assets.outputs.checksums_sha256 }}
           EXPECTED_MANIFEST_SHA256: ${{ needs.prepare-github-release-assets.outputs.manifest_sha256 }}
           EXPECTED_PUBLISHER_SHA256: ${{ needs.prepare-github-release-assets.outputs.publisher_sha256 }}
@@ -1041,6 +1348,7 @@ jobs:
           [[ "${EXPECTED_CHECKSUMS_SHA256}" =~ ^[a-f0-9]{64}$ ]]
           [[ "${EXPECTED_MANIFEST_SHA256}" =~ ^[a-f0-9]{64}$ ]]
           [[ "${EXPECTED_PUBLISHER_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${SOURCE_COMMIT}" =~ ^[a-f0-9]{40}$ ]]
           printf '%s  %s\n' "${EXPECTED_CHECKSUMS_SHA256}" \
             "${assets}/SHA256SUMS" | sha256sum --check --strict -
           printf '%s  %s\n' "${EXPECTED_MANIFEST_SHA256}" \
@@ -1050,6 +1358,119 @@ jobs:
           [[ "$(find "${RUNNER_TEMP}/github-release-publisher" \
             -mindepth 1 -maxdepth 1 -printf '%f %y\n')" == \
             'publish-github-release.py f' ]]
+
+          contents_json="${RUNNER_TEMP}/github-release-publisher-contents.json"
+          gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GITHUB_REPOSITORY}/contents/scripts/publish-github-release.py" \
+            -f ref="${SOURCE_COMMIT}" >"${contents_json}"
+          publisher_blob_sha="$(python3 - "${contents_json}" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+
+          try:
+              metadata = json.loads(
+                  Path(sys.argv[1]).read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicate_keys,
+              )
+          except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+              raise SystemExit(f"Publisher contents API returned invalid JSON: {error}")
+          if not isinstance(metadata, dict):
+              raise SystemExit("Publisher contents API did not return an object")
+          blob_sha = metadata.get("sha")
+          size = metadata.get("size")
+          if not (
+              metadata.get("type") == "file"
+              and metadata.get("name") == "publish-github-release.py"
+              and metadata.get("path") == "scripts/publish-github-release.py"
+              and isinstance(blob_sha, str)
+              and re.fullmatch(r"[a-f0-9]{40}", blob_sha)
+              and isinstance(size, int)
+              and not isinstance(size, bool)
+              and size > 0
+          ):
+              raise SystemExit("Publisher contents API metadata is invalid")
+          print(blob_sha)
+          PY
+          )"
+          [[ "${publisher_blob_sha}" =~ ^[a-f0-9]{40}$ ]]
+          blob_json="${RUNNER_TEMP}/github-release-publisher-blob.json"
+          gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${publisher_blob_sha}" \
+            >"${blob_json}"
+          python3 - \
+            "${contents_json}" "${blob_json}" "${publisher}" \
+            "${EXPECTED_PUBLISHER_SHA256}" <<'PY'
+          import base64
+          import binascii
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+
+          def load_api_json(path, context):
+              try:
+                  value = json.loads(
+                      Path(path).read_text(encoding="utf-8"),
+                      object_pairs_hook=reject_duplicate_keys,
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                  raise SystemExit(f"{context} returned invalid JSON: {error}")
+              if not isinstance(value, dict):
+                  raise SystemExit(f"{context} did not return an object")
+              return value
+
+
+          contents = load_api_json(sys.argv[1], "Publisher contents API")
+          blob = load_api_json(sys.argv[2], "Publisher blob API")
+          publisher = Path(sys.argv[3]).read_bytes()
+          expected_sha256 = sys.argv[4]
+          content = blob.get("content")
+          if not isinstance(content, str) or blob.get("encoding") != "base64":
+              raise SystemExit("Publisher blob API encoding is invalid")
+          try:
+              canonical = base64.b64decode("".join(content.split()), validate=True)
+          except (ValueError, binascii.Error) as error:
+              raise SystemExit(f"Publisher blob API content is invalid: {error}")
+          blob_sha = contents.get("sha")
+          size = contents.get("size")
+          git_blob_sha = hashlib.sha1(
+              b"blob " + str(len(canonical)).encode("ascii") + b"\0" + canonical
+          ).hexdigest()
+          if not (
+              blob.get("sha") == blob_sha
+              and blob.get("size") == size == len(canonical)
+              and git_blob_sha == blob_sha
+              and hashlib.sha256(canonical).hexdigest() == expected_sha256
+              and publisher == canonical
+          ):
+              raise SystemExit(
+                  "Downloaded publisher is not the exact helper from the tagged commit"
+              )
+          PY
           (
             cd "${assets}"
             sha256sum --check --strict SHA256SUMS
@@ -1058,6 +1479,15 @@ jobs:
           import json
           from pathlib import Path
           import sys
+
+          def reject_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
 
           assets = Path(sys.argv[1])
           tag, commit = sys.argv[2:]
@@ -1078,9 +1508,15 @@ jobs:
               raise SystemExit("Permanent release asset set differs at write boundary")
           if any(entry.is_symlink() or not entry.is_file() for entry in entries):
               raise SystemExit("Permanent release handoff contains a non-regular file")
-          manifest = json.loads(
-              (assets / "release-assets-manifest.json").read_text(encoding="utf-8")
-          )
+          try:
+              manifest = json.loads(
+                  (assets / "release-assets-manifest.json").read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicate_keys,
+              )
+          except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+              raise SystemExit(f"Release asset manifest is invalid JSON: {error}")
+          if not isinstance(manifest, dict):
+              raise SystemExit("Release asset manifest root must be an object")
           if (
               manifest.get("version") != version
               or manifest.get("tag") != tag
@@ -1132,7 +1568,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      actions: read
       attestations: read
       contents: read
       packages: read

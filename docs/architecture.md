@@ -152,6 +152,16 @@ an immutable GitHub Release. Private staging consumes that chain and generates
 a secret-free deployment bundle whose
 application image references come directly from the verified release receipt;
 the staging host cannot rebuild source or select a mutable alias.
+The staging workflow is dispatched from protected `main`. It treats the
+selected release tag as immutable data and sends the persistent host a separate
+minimal tooling handoff bound to the workflow commit. That tooling artifact is
+created and uploaded in an isolated hosted job before a different runner
+uses the same trusted-main verifier and assembler to read only allowlisted blobs
+from the historical release tree; no release-tag script is executed. The
+Docker-capable host does not check out either repository source or the
+historical release tag. A
+second hosted job verifies the host's canonical, checksummed operation
+assertion. See [ADR 0032](adr/0032-trusted-staging-promotion.md).
 
 Private staging uses five networks. `dns-egress` is the DNS server's only
 non-internal network and permits recursive upstream traffic. The internal

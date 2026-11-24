@@ -1,0 +1,210 @@
+name: First release rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Unused vMAJOR.MINOR.PATCH identity to rehearse locally
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: first-release-rehearsal-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  rehearse-release-candidate:
+    name: Rehearse release candidate locally
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      producer_attempt: ${{ steps.identity.outputs.producer_attempt }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check out canonical main without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Validate the non-publishing rehearsal identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            printf '%s\n' 'First-release rehearsal must be dispatched from main.' >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Invalid rehearsal tag: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          source_commit="$(git rev-parse HEAD)"
+          if [[ "${source_commit}" != "${GITHUB_SHA}" ]]; then
+            printf '%s\n' 'Checked-out commit differs from the workflow commit.' >&2
+            exit 1
+          fi
+          if [[ "${source_commit}" != "$(git rev-parse refs/remotes/origin/main)" ]]; then
+            printf '%s\n' 'Workflow commit is not the fetched canonical main tip.' >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            printf '%s\n' 'Rehearsal checkout must be clean.' >&2
+            exit 1
+          fi
+          if [[ -n "$(git tag --points-at HEAD)" ]]; then
+            printf '%s\n' 'Rehearsal commit already has a tag.' >&2
+            exit 1
+          fi
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            printf 'Rehearsal tag already exists locally: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          remote_tag="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+          if [[ -n "${remote_tag}" ]]; then
+            printf 'Rehearsal tag already exists remotely: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          git config user.name 'DNS Platform release rehearsal'
+          git config user.email 'release-rehearsal@users.noreply.github.com'
+          git config tag.gpgSign false
+          git tag --annotate "${RELEASE_TAG}" --message "Local rehearsal ${RELEASE_TAG}"
+          [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${source_commit}" ]]
+          artifact_name="first-release-rehearsal-${RELEASE_TAG}-${source_commit}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+          printf 'producer_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+          printf 'source_commit=%s\n' "${source_commit}" >>"${GITHUB_OUTPUT}"
+
+      - name: Run the full Maven verification gate
+        run: ./scripts/verify.sh
+
+      - name: Run the complete configuration and contract gate
+        run: ./scripts/validate-compose.sh
+
+      - name: Build the first isolated release bundle
+        run: |
+          set -euo pipefail
+          ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+          mv dist "${RUNNER_TEMP}/first-release-bundle"
+
+      - name: Rebuild and compare the release bundle
+        run: |
+          set -euo pipefail
+          ./scripts/create-release-bundle.sh "${RELEASE_TAG}"
+          first="${RUNNER_TEMP}/first-release-bundle"
+          for file in SHA256SUMS release-manifest.json \
+              "admin-api-${RELEASE_TAG#v}.jar" \
+              "dns-server-${RELEASE_TAG#v}.jar"; do
+            cmp --silent "${first}/${file}" "dist/${file}"
+          done
+
+      - name: Create and verify the non-publishing rehearsal evidence
+        run: |
+          set -euo pipefail
+          ./scripts/create-release-rehearsal-evidence.py \
+            "${RUNNER_TEMP}/first-release-bundle" \
+            dist \
+            "${RUNNER_TEMP}/release-rehearsal-evidence" \
+            --tag "${RELEASE_TAG}" \
+            --source-commit "${{ steps.identity.outputs.source_commit }}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          ./scripts/verify-release-rehearsal-evidence.py \
+            "${RUNNER_TEMP}/release-rehearsal-evidence" \
+            --expected-tag "${RELEASE_TAG}" \
+            --expected-source-commit "${{ steps.identity.outputs.source_commit }}" \
+            --expected-workflow-run-id "${GITHUB_RUN_ID}" \
+            --expected-workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
+
+      - name: Upload the local rehearsal evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-rehearsal-evidence/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  verify-release-rehearsal:
+    name: Verify local rehearsal evidence
+    needs: rehearse-release-candidate
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    env:
+      PRODUCER_ATTEMPT: ${{ needs.rehearse-release-candidate.outputs.producer_attempt }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_COMMIT: ${{ needs.rehearse-release-candidate.outputs.source_commit }}
+    steps:
+      - name: Check out the exact reviewed verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.rehearse-release-candidate.outputs.source_commit }}
+
+      - name: Download the exact rehearsal evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.rehearse-release-candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-rehearsal-evidence
+
+      - name: Reconstruct the local annotated identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_COMMIT}" ]]
+          [[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            printf '%s\n' 'The rehearsal verifier expected an unused tag.' >&2
+            exit 1
+          fi
+          git config user.name 'DNS Platform release rehearsal verifier'
+          git config user.email 'release-rehearsal@users.noreply.github.com'
+          git config tag.gpgSign false
+          git tag --annotate "${RELEASE_TAG}" --message "Local verification ${RELEASE_TAG}"
+          [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${SOURCE_COMMIT}" ]]
+
+      - name: Independently verify both bundles and the result boundary
+        run: |
+          ./scripts/verify-release-rehearsal-evidence.py \
+            "${RUNNER_TEMP}/release-rehearsal-evidence" \
+            --expected-tag "${RELEASE_TAG}" \
+            --expected-source-commit "${SOURCE_COMMIT}" \
+            --expected-workflow-run-id "${GITHUB_RUN_ID}" \
+            --expected-workflow-run-attempt "${PRODUCER_ATTEMPT}"
+
+      - name: Summarize the bounded result
+        shell: bash
+        run: |
+          {
+            printf '%s\n' '## First release rehearsal'
+            printf '\n- Status: `local-rehearsal-passed`\n'
+            printf -- '- Tag identity: `%s` (not pushed)\n' "${RELEASE_TAG}"
+            printf -- '- Source commit: `%s`\n' "${SOURCE_COMMIT}"
+            printf '%s\n' '- No image, attestation, GitHub Release, or deployment was created.'
+            printf '%s\n' '- External GitHub and private-staging controls remain unverified.'
+            printf '%s\n' '- This result is not an overall release go/no-go authorization.'
+          } >>"${GITHUB_STEP_SUMMARY}"

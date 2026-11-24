@@ -7,6 +7,8 @@ umask 077
 
 POSTGRES_IMAGE='docker.io/library/postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=staging-common.sh
+source "${SCRIPT_DIR}/staging-common.sh"
 
 fail() {
     printf 'Staging restore rehearsal failed: %s\n' "$1" >&2
@@ -26,6 +28,10 @@ VERIFY_ONLY=false
 if [[ $# -eq 4 ]]; then
     [[ "$4" == --verify-only ]] || fail 'the only supported fourth argument is --verify-only'
     VERIFY_ONLY=true
+fi
+
+if [[ "${VERIFY_ONLY}" != true ]]; then
+    staging_reject_inherited_container_controls
 fi
 
 for command in python3; do

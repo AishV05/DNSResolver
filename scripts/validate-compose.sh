@@ -16,8 +16,11 @@ RELEASE_SCHEMA_FILE="${REPO_ROOT}/release/release-manifest.schema.json"
 CONTAINER_PUBLICATION_SCHEMA_FILE="${REPO_ROOT}/release/container-publication-manifest.schema.json"
 IMAGE_SBOM_SCHEMA_FILE="${REPO_ROOT}/release/image-sbom-manifest.schema.json"
 RELEASE_ASSETS_SCHEMA_FILE="${REPO_ROOT}/release/release-assets-manifest.schema.json"
+RELEASE_REHEARSAL_SCHEMA_FILE="${REPO_ROOT}/release/release-rehearsal-result.schema.json"
 STAGING_DEPLOYMENT_SCHEMA_FILE="${REPO_ROOT}/release/staging-deployment-manifest.schema.json"
 STAGING_BACKUP_SCHEMA_FILE="${REPO_ROOT}/release/staging-backup-metadata.schema.json"
+STAGING_OPERATION_SCHEMA_FILE="${REPO_ROOT}/release/staging-operation-result.schema.json"
+STAGING_TOOLING_SCHEMA_FILE="${REPO_ROOT}/release/staging-tooling-manifest.schema.json"
 STAGING_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/dns-staging-validation.XXXXXX")"
 STAGING_ENV_FILE="${STAGING_FIXTURE}/staging.env"
 STAGING_SECRETS_DIR="${STAGING_FIXTURE}/secrets"
@@ -268,19 +271,37 @@ python3 -m json.tool "${RELEASE_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${CONTAINER_PUBLICATION_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${IMAGE_SBOM_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${RELEASE_ASSETS_SCHEMA_FILE}" >/dev/null
+python3 -m json.tool "${RELEASE_REHEARSAL_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${STAGING_DEPLOYMENT_SCHEMA_FILE}" >/dev/null
 python3 -m json.tool "${STAGING_BACKUP_SCHEMA_FILE}" >/dev/null
+python3 -m json.tool "${STAGING_OPERATION_SCHEMA_FILE}" >/dev/null
+python3 -m json.tool "${STAGING_TOOLING_SCHEMA_FILE}" >/dev/null
 python3 "${REPO_ROOT}/scripts/resolver-fleet-e2e.py" --help >/dev/null
 python3 "${REPO_ROOT}/scripts/provision-resolver-agent.py" --help >/dev/null
 python3 "${REPO_ROOT}/scripts/provision-fleet-metrics-reader.py" --help >/dev/null
 python3 "${REPO_ROOT}/scripts/normalize-spdx-sbom.py" --self-test
+python3 "${REPO_ROOT}/scripts/test-release-sboms.py"
+python3 "${REPO_ROOT}/scripts/test-release-assets.py"
+python3 "${REPO_ROOT}/scripts/test-release-attestations.py"
+python3 "${REPO_ROOT}/scripts/test-attestation-handoff.py"
+python3 "${REPO_ROOT}/scripts/test-release-image-runtime-contract.py"
+python3 "${REPO_ROOT}/scripts/test-release-preflight.py"
+python3 "${REPO_ROOT}/scripts/test-publish-release-images.py"
+python3 "${REPO_ROOT}/scripts/test-container-publication-runtime-env.py"
 python3 "${REPO_ROOT}/scripts/test-publish-github-release.py"
+python3 "${REPO_ROOT}/scripts/test-verify-github-release.py"
+python3 "${REPO_ROOT}/scripts/test-release-rehearsal.py"
 python3 "${REPO_ROOT}/scripts/test-staging-smoke.py"
 python3 "${REPO_ROOT}/scripts/test-provision-policy-reader.py"
 python3 "${REPO_ROOT}/scripts/test-provision-resolver-agent.py"
 python3 "${REPO_ROOT}/scripts/test-provision-fleet-metrics-reader.py"
 python3 "${REPO_ROOT}/scripts/test-staging-deployment-bundle.py"
+python3 "${REPO_ROOT}/scripts/test-create-staging-deployment-bundle.py"
 python3 "${REPO_ROOT}/scripts/test-staging-backup-evidence.py"
+python3 "${REPO_ROOT}/scripts/test-staging-compose-security.py"
+python3 "${REPO_ROOT}/scripts/test-staging-promotion-guards.py"
+python3 "${REPO_ROOT}/scripts/test-staging-operation-evidence.py"
+python3 "${REPO_ROOT}/scripts/test-staging-tooling-handoff.py"
 
 mkdir -p \
     "${STAGING_FIXTURE}/observability/prometheus/rules" \

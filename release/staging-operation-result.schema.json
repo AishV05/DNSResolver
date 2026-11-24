@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform staging operation result",
+  "description": "Structural contract for secret-free evidence produced by a private-staging operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "environment",
+    "operation",
+    "status",
+    "version",
+    "tag",
+    "sourceCommit",
+    "toolingCommit",
+    "workflowRunId",
+    "workflowRunAttempt",
+    "bundleChecksumsSha256",
+    "images"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "environment": {
+      "const": "staging"
+    },
+    "operation": {
+      "type": "string",
+      "pattern": "^(preflight|deploy|bootstrap|initialize-fleet-metrics)$"
+    },
+    "status": {
+      "type": "string",
+      "pattern": "^(preflight-passed|healthy)$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "sourceCommit": {
+      "$ref": "#/$defs/commit"
+    },
+    "toolingCommit": {
+      "$ref": "#/$defs/commit"
+    },
+    "workflowRunId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "workflowRunAttempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "bundleChecksumsSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "images": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "admin-api"
+                },
+                "repository": {
+                  "const": "ghcr.io/aishv05/dns-admin-api"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "dns-server"
+                },
+                "repository": {
+                  "const": "ghcr.io/aishv05/dns-resolver"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "grafana"
+                },
+                "repository": {
+                  "const": "docker.io/grafana/grafana"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "postgres"
+                },
+                "repository": {
+                  "const": "docker.io/library/postgres"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "prometheus"
+                },
+                "repository": {
+                  "const": "docker.io/prom/prometheus"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "digest",
+        "reference"
+      ],
+      "properties": {
+        "component": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9./-]+$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9./-]+@sha256:[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

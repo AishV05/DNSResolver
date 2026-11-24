@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNS Platform staging tooling handoff manifest",
+  "description": "Structural contract for the deterministic, secret-free staging deployment tooling handoff.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "project",
+    "environment",
+    "source",
+    "files",
+    "checksumFile"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "const": "dns-platform"
+    },
+    "environment": {
+      "const": "staging"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 20,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "checksumFile": {
+      "$ref": "#/$defs/checksumFile"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "commitTimestamp"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/AishV05/DNSResolver"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "commitTimestamp": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "path",
+        "mediaType",
+        "mode",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(release|scripts)/[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+        },
+        "mediaType": {
+          "type": "string",
+          "pattern": "^[a-z]+/[a-z0-9.+-]+$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^0(644|755)$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "checksumFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "algorithm",
+        "entryCount",
+        "coveredFiles"
+      ],
+      "properties": {
+        "filename": {
+          "const": "SHA256SUMS"
+        },
+        "algorithm": {
+          "const": "sha256"
+        },
+        "entryCount": {
+          "const": 21
+        },
+        "coveredFiles": {
+          "type": "array",
+          "minItems": 21,
+          "maxItems": 21,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(release|scripts)/[a-zA-Z0-9][a-zA-Z0-9._/-]*$|^staging-tooling-manifest\\.json$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Assemble a deterministic, secret-free private staging deployment bundle
-# from a fully verified immutable-release asset directory.
+# from verified release assets and allowlisted data blobs in the release tree.
 set -euo pipefail
 umask 077
 
@@ -47,32 +47,60 @@ for command in git python3; do
         || fail "required command is unavailable: ${command}"
 done
 
-"${SCRIPT_DIR}/verify-release-assets.sh" "${RELEASE_ASSETS_DIR}"
-
-RELEASE_TAG="$(python3 - "${RELEASE_ASSETS_DIR}/release-assets-manifest.json" <<'PY'
+RELEASE_IDENTITY="$(python3 - \
+    "${RELEASE_ASSETS_DIR}/release-assets-manifest.json" <<'PY'
 import json
+from pathlib import Path
+import re
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as source:
-    print(json.load(source)["tag"])
-PY
-)"
-RELEASE_COMMIT="$(python3 - "${RELEASE_ASSETS_DIR}/release-assets-manifest.json" <<'PY'
-import json
-import sys
 
-with open(sys.argv[1], encoding="utf-8") as source:
-    print(json.load(source)["source"]["commit"])
+def fail(message: str) -> None:
+    raise SystemExit(f"Staging bundle creation failed: {message}")
+
+
+def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            fail(f"release asset manifest repeats field {key!r}")
+        value[key] = item
+    return value
+
+
+path = Path(sys.argv[1])
+try:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+        fail("release asset manifest is unavailable or exceeds 1 MiB")
+    manifest = json.loads(
+        path.read_text(encoding="utf-8"), object_pairs_hook=unique
+    )
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    fail(f"cannot read release asset manifest: {error}")
+if not isinstance(manifest, dict):
+    fail("release asset manifest root must be an object")
+tag = manifest.get("tag")
+source = manifest.get("source")
+commit = source.get("commit") if isinstance(source, dict) else None
+if not isinstance(tag, str) or re.fullmatch(
+    r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag
+) is None:
+    fail("release asset tag is invalid")
+if not isinstance(commit, str) or re.fullmatch(r"[a-f0-9]{40}", commit) is None:
+    fail("release asset source commit is invalid")
+print(f"{tag}\t{commit}")
 PY
 )"
+IFS=$'\t' read -r RELEASE_TAG RELEASE_COMMIT <<<"${RELEASE_IDENTITY}"
 
 cd "${REPO_ROOT}"
 [[ "$(git rev-parse --show-toplevel)" == "${REPO_ROOT}" ]] \
     || fail 'repository root could not be established'
-[[ "$(git rev-parse HEAD)" == "${RELEASE_COMMIT}" ]] \
-    || fail 'current checkout does not match the immutable release commit'
 [[ "$(git rev-parse --is-shallow-repository)" == false ]] \
     || fail 'release deployment bundle cannot be created from a shallow checkout'
+ASSEMBLER_COMMIT="$(git rev-parse --verify 'HEAD^{commit}')"
+[[ "${ASSEMBLER_COMMIT}" =~ ^[a-f0-9]{40}$ ]] \
+    || fail 'trusted assembler is not a full commit identity'
 git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}" \
     || fail "release tag is unavailable locally: ${RELEASE_TAG}"
 [[ "$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")" == "${RELEASE_COMMIT}" ]] \
@@ -81,15 +109,26 @@ git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}" \
     || fail 'release tag must be annotated'
 git show-ref --verify --quiet refs/remotes/origin/main \
     || fail 'refs/remotes/origin/main is unavailable; fetch canonical main first'
+[[ "${ASSEMBLER_COMMIT}" == "$(git rev-parse refs/remotes/origin/main)" ]] \
+    || fail 'staging bundle assembler must be the exact canonical origin/main tip'
 git merge-base --is-ancestor "${RELEASE_COMMIT}" refs/remotes/origin/main \
     || fail 'release commit is not reachable from canonical origin/main'
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
     || fail 'working tree must be clean, including untracked files'
 
 STAGING_DIR="$(mktemp -d "${OUTPUT_PARENT}/.staging-deployment.XXXXXX")"
+VERIFY_WORKTREE="$(mktemp -d "${OUTPUT_PARENT}/.staging-release-source.XXXXXX")"
+rmdir "${VERIFY_WORKTREE}"
+VERIFY_WORKTREE_ADDED=false
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
+    if [[ "${VERIFY_WORKTREE_ADDED}" == true ]]; then
+        git -C "${REPO_ROOT}" worktree remove --force "${VERIFY_WORKTREE}" \
+            >/dev/null 2>&1 || true
+    elif [[ -e "${VERIFY_WORKTREE}" || -L "${VERIFY_WORKTREE}" ]]; then
+        rm -rf "${VERIFY_WORKTREE}"
+    fi
     if [[ -d "${STAGING_DIR}" ]]; then
         rm -rf "${STAGING_DIR}"
     fi
@@ -99,45 +138,71 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-copy_regular_file() {
-    local source=$1
-    local destination=$2
+# Run the trusted-main verifier code against a detached, clean Git view of the
+# immutable release commit. The Git environment affects only the verifier;
+# subsequent assembly still executes from the reviewed canonical-main checkout.
+git -C "${REPO_ROOT}" worktree add --detach --quiet \
+    "${VERIFY_WORKTREE}" "${RELEASE_COMMIT}" \
+    || fail 'could not create a detached release-source verification worktree'
+VERIFY_WORKTREE_ADDED=true
+VERIFY_GIT_DIR="$(git -C "${VERIFY_WORKTREE}" rev-parse --absolute-git-dir)"
+GIT_DIR="${VERIFY_GIT_DIR}" \
+GIT_WORK_TREE="${VERIFY_WORKTREE}" \
+PYTHONDONTWRITEBYTECODE=1 \
+    "${SCRIPT_DIR}/verify-release-assets.sh" "${RELEASE_ASSETS_DIR}"
+git -C "${REPO_ROOT}" worktree remove --force "${VERIFY_WORKTREE}" \
+    || fail 'could not remove the detached release-source verification worktree'
+VERIFY_WORKTREE_ADDED=false
 
-    [[ -f "${source}" && ! -L "${source}" ]] \
-        || fail "required source is not a regular non-symlink file: ${source}"
+copy_release_blob() {
+    local relative=$1
+    local destination=$2
+    local entry metadata listed_path
+
+    entry="$(git ls-tree "${RELEASE_COMMIT}" -- "${relative}")"
+    IFS=$'\t' read -r metadata listed_path <<<"${entry}"
+    case "${metadata}" in
+        "100644 blob "[a-f0-9][a-f0-9]*|"100755 blob "[a-f0-9][a-f0-9]*) ;;
+        *) fail "release source is not an allowlisted regular blob: ${relative}" ;;
+    esac
+    [[ "${listed_path}" == "${relative}" ]] \
+        || fail "release source path identity differs: ${relative}"
     mkdir -p "$(dirname "${destination}")"
-    cp "${source}" "${destination}"
+    git show "${RELEASE_COMMIT}:${relative}" >"${destination}" \
+        || fail "could not read release source blob: ${relative}"
+    [[ -f "${destination}" && ! -L "${destination}" ]] \
+        || fail "release source destination is unsafe: ${relative}"
 }
 
-copy_regular_file \
-    "${REPO_ROOT}/deploy/staging/compose.yaml" \
+copy_release_blob \
+    'deploy/staging/compose.yaml' \
     "${STAGING_DIR}/compose.yaml"
-copy_regular_file \
-    "${REPO_ROOT}/deploy/staging/compose.bootstrap.yaml" \
+copy_release_blob \
+    'deploy/staging/compose.bootstrap.yaml' \
     "${STAGING_DIR}/compose.bootstrap.yaml"
-copy_regular_file \
-    "${REPO_ROOT}/deploy/staging/staging.env.example" \
+copy_release_blob \
+    'deploy/staging/staging.env.example' \
     "${STAGING_DIR}/staging.env.example"
-copy_regular_file \
+cp \
     "${RELEASE_ASSETS_DIR}/container-publication-manifest.json" \
     "${STAGING_DIR}/container-publication-manifest.json"
-copy_regular_file \
+cp \
     "${RELEASE_ASSETS_DIR}/release-assets-manifest.json" \
     "${STAGING_DIR}/release-assets-manifest.json"
-copy_regular_file \
-    "${REPO_ROOT}/observability/prometheus/prometheus.yml" \
+copy_release_blob \
+    'observability/prometheus/prometheus.yml' \
     "${STAGING_DIR}/observability/prometheus/prometheus.yml"
-copy_regular_file \
-    "${REPO_ROOT}/observability/prometheus/rules/dns-alerts.yml" \
+copy_release_blob \
+    'observability/prometheus/rules/dns-alerts.yml' \
     "${STAGING_DIR}/observability/prometheus/rules/dns-alerts.yml"
-copy_regular_file \
-    "${REPO_ROOT}/observability/grafana/provisioning/datasources/prometheus.yml" \
+copy_release_blob \
+    'observability/grafana/provisioning/datasources/prometheus.yml' \
     "${STAGING_DIR}/observability/grafana/provisioning/datasources/prometheus.yml"
-copy_regular_file \
-    "${REPO_ROOT}/observability/grafana/provisioning/dashboards/dns-resolver.yml" \
+copy_release_blob \
+    'observability/grafana/provisioning/dashboards/dns-resolver.yml' \
     "${STAGING_DIR}/observability/grafana/provisioning/dashboards/dns-resolver.yml"
-copy_regular_file \
-    "${REPO_ROOT}/observability/grafana/dashboards/dns-resolver-operations.json" \
+copy_release_blob \
+    'observability/grafana/dashboards/dns-resolver-operations.json' \
     "${STAGING_DIR}/observability/grafana/dashboards/dns-resolver-operations.json"
 
 python3 - \

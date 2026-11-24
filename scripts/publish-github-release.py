@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any
+from typing import Any, Iterable, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -30,6 +30,10 @@ COMMIT = re.compile(r"[a-f0-9]{40}")
 
 
 class ReleaseError(RuntimeError):
+    pass
+
+
+class DuplicateKeyError(ValueError):
     pass
 
 
@@ -96,6 +100,24 @@ def require_object(value: Any, context: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"{context} is not an object")
     return value
+
+
+def reject_duplicate_keys(pairs: Iterable[Tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateKeyError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def require_exact_keys(
+    value: Any, expected: list[str], context: str
+) -> dict[str, Any]:
+    result = require_object(value, context)
+    if list(result) != expected:
+        fail(f"{context} fields or field order differ from the contract")
+    return result
 
 
 def list_releases(api: str, token: str) -> list[dict[str, Any]]:
@@ -186,6 +208,282 @@ def expected_asset_metadata(asset_dir: Path, version: str) -> dict[str, dict[str
     }
 
 
+def validate_local_handoff(
+    asset_dir: Path,
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    tag: str,
+    commit: str,
+) -> dict[str, dict[str, Any]]:
+    """Validate the complete permanent-asset contract before any remote write."""
+    version = tag[1:]
+    manifest = require_exact_keys(
+        manifest,
+        [
+            "schemaVersion",
+            "project",
+            "version",
+            "tag",
+            "source",
+            "manifests",
+            "binaries",
+            "imageSboms",
+            "checksumFile",
+        ],
+        "release-assets manifest",
+    )
+    if manifest["schemaVersion"] != 1 or isinstance(manifest["schemaVersion"], bool):
+        fail("release-assets schemaVersion must be integer 1")
+    if manifest["project"] != "dns-platform":
+        fail("release-assets project must be dns-platform")
+    if manifest["version"] != version or manifest["tag"] != tag:
+        fail("release-assets version or tag differs from the requested release")
+    source = require_exact_keys(
+        manifest["source"],
+        ["repository", "commit", "commitTimestamp"],
+        "release-assets source",
+    )
+    if source["repository"] != CANONICAL_SOURCE or source["commit"] != commit:
+        fail("release-assets source identity differs from the requested release")
+    if (
+        not isinstance(source["commitTimestamp"], int)
+        or isinstance(source["commitTimestamp"], bool)
+        or source["commitTimestamp"] < 0
+    ):
+        fail("release-assets commitTimestamp is invalid")
+
+    admin_jar = f"admin-api-{version}.jar"
+    dns_jar = f"dns-server-{version}.jar"
+    covered = [
+        admin_jar,
+        "admin-api.spdx.json",
+        "container-publication-manifest.json",
+        dns_jar,
+        "dns-server.spdx.json",
+        "image-sbom-manifest.json",
+        "release-assets-manifest.json",
+        "release-manifest.json",
+    ]
+    expected = expected_asset_metadata(asset_dir, version)
+    checksum = require_exact_keys(
+        manifest["checksumFile"],
+        ["filename", "algorithm", "coveredFiles"],
+        "release-assets checksumFile",
+    )
+    if checksum != {
+        "filename": "SHA256SUMS",
+        "algorithm": "sha256",
+        "coveredFiles": covered,
+    }:
+        fail("release-assets checksum contract differs")
+    checksum_bytes = (asset_dir / "SHA256SUMS").read_bytes()
+    if (
+        not checksum_bytes.endswith(b"\n")
+        or checksum_bytes.endswith(b"\n\n")
+        or b"\r" in checksum_bytes
+    ):
+        fail("SHA256SUMS line endings are invalid")
+    try:
+        checksum_lines = checksum_bytes.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        fail(f"SHA256SUMS is not ASCII: {error}")
+    expected_lines = [
+        f"{expected[name]['digest'].removeprefix('sha256:')}  {name}"
+        for name in covered
+    ]
+    if checksum_lines != expected_lines:
+        fail("SHA256SUMS differs from the exact ordered asset inventory")
+
+    def descriptor(
+        value: Any,
+        keys: list[str],
+        context: str,
+        filename: str,
+        fixed: dict[str, Any],
+    ) -> dict[str, Any]:
+        item = require_exact_keys(value, keys, context)
+        metadata = expected[filename]
+        wanted = {
+            **fixed,
+            "filename": filename,
+            "mediaType": fixed["mediaType"],
+            "sizeBytes": metadata["size"],
+            "sha256": metadata["digest"].removeprefix("sha256:"),
+        }
+        if (
+            not isinstance(item.get("sizeBytes"), int)
+            or isinstance(item.get("sizeBytes"), bool)
+            or item != wanted
+        ):
+            fail(f"release-assets descriptor differs for {filename}")
+        return item
+
+    manifest_entries = manifest["manifests"]
+    binary_entries = manifest["binaries"]
+    sbom_entries = manifest["imageSboms"]
+    if not isinstance(manifest_entries, list) or len(manifest_entries) != 3:
+        fail("release-assets manifests must contain exactly three entries")
+    if not isinstance(binary_entries, list) or len(binary_entries) != 2:
+        fail("release-assets binaries must contain exactly two entries")
+    if not isinstance(sbom_entries, list) or len(sbom_entries) != 2:
+        fail("release-assets imageSboms must contain exactly two entries")
+    descriptor_keys = ["role", "filename", "mediaType", "sizeBytes", "sha256"]
+    for item, role, filename in zip(
+        manifest_entries,
+        ("release-bundle", "container-publication", "image-sbom"),
+        (
+            "release-manifest.json",
+            "container-publication-manifest.json",
+            "image-sbom-manifest.json",
+        ),
+    ):
+        descriptor(
+            item,
+            descriptor_keys,
+            f"release-assets manifest descriptor {role}",
+            filename,
+            {"role": role, "mediaType": "application/json"},
+        )
+    for item, component, filename in zip(
+        binary_entries,
+        ("admin-api", "dns-server"),
+        (admin_jar, dns_jar),
+    ):
+        descriptor(
+            item,
+            ["component", "filename", "mediaType", "sizeBytes", "sha256"],
+            f"release-assets binary descriptor {component}",
+            filename,
+            {"component": component, "mediaType": "application/java-archive"},
+        )
+
+    receipt = require_object(receipt, "publication receipt")
+    if (
+        receipt.get("project") != "dns-platform"
+        or receipt.get("version") != version
+        or receipt.get("tag") != tag
+        or receipt.get("source")
+        != {"repository": CANONICAL_SOURCE, "commit": commit}
+    ):
+        fail("publication receipt identity differs from the requested release")
+    receipt_images = receipt.get("images")
+    if not isinstance(receipt_images, list) or len(receipt_images) != 2:
+        fail("publication receipt must contain exactly two images")
+    repositories = (
+        "ghcr.io/aishv05/dns-admin-api",
+        "ghcr.io/aishv05/dns-resolver",
+    )
+    for item, receipt_image, component, filename, repository in zip(
+        sbom_entries,
+        receipt_images,
+        ("admin-api", "dns-server"),
+        ("admin-api.spdx.json", "dns-server.spdx.json"),
+        repositories,
+    ):
+        image = require_object(receipt_image, f"publication image {component}")
+        digest = image.get("digest")
+        if (
+            image.get("component") != component
+            or image.get("repository") != repository
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", digest) is None
+        ):
+            fail(f"publication image identity differs for {component}")
+        metadata = expected[filename]
+        wanted = {
+            "component": component,
+            "filename": filename,
+            "mediaType": "application/spdx+json",
+            "sizeBytes": metadata["size"],
+            "sha256": metadata["digest"].removeprefix("sha256:"),
+            "subject": {"repository": repository, "digest": digest},
+        }
+        entry = require_exact_keys(
+            item,
+            [
+                "component",
+                "filename",
+                "mediaType",
+                "sizeBytes",
+                "sha256",
+                "subject",
+            ],
+            f"release-assets image SBOM descriptor {component}",
+        )
+        require_exact_keys(entry["subject"], ["repository", "digest"], "SBOM subject")
+        if (
+            not isinstance(entry.get("sizeBytes"), int)
+            or isinstance(entry.get("sizeBytes"), bool)
+            or entry != wanted
+        ):
+            fail(f"release-assets descriptor differs for {filename}")
+
+    release_manifest, _ = load_manifest(asset_dir / "release-manifest.json")
+    if (
+        release_manifest.get("project") != "dns-platform"
+        or release_manifest.get("version") != version
+        or release_manifest.get("tag") != tag
+        or release_manifest.get("source") != source
+    ):
+        fail("release manifest identity differs from the requested release")
+    release_artifacts = release_manifest.get("artifacts")
+    if not isinstance(release_artifacts, list) or len(release_artifacts) != 2:
+        fail("release manifest artifacts are invalid")
+    for artifact, component, filename in zip(
+        release_artifacts,
+        ("admin-api", "dns-server"),
+        (admin_jar, dns_jar),
+    ):
+        artifact = require_object(artifact, f"release artifact {component}")
+        metadata = expected[filename]
+        if (
+            not isinstance(artifact.get("sizeBytes"), int)
+            or isinstance(artifact.get("sizeBytes"), bool)
+            or artifact.get("name") != component
+            or artifact.get("file") != filename
+            or artifact.get("sizeBytes") != metadata["size"]
+            or artifact.get("sha256")
+            != metadata["digest"].removeprefix("sha256:")
+        ):
+            fail(f"release manifest artifact differs for {component}")
+
+    sbom_manifest, _ = load_manifest(asset_dir / "image-sbom-manifest.json")
+    if (
+        sbom_manifest.get("project") != "dns-platform"
+        or sbom_manifest.get("version") != version
+        or sbom_manifest.get("tag") != tag
+        or sbom_manifest.get("source") != source
+    ):
+        fail("image SBOM manifest identity differs from the requested release")
+    sbom_images = sbom_manifest.get("images")
+    if not isinstance(sbom_images, list) or len(sbom_images) != 2:
+        fail("image SBOM manifest images are invalid")
+    for image, receipt_image, component, filename, repository in zip(
+        sbom_images,
+        receipt_images,
+        ("admin-api", "dns-server"),
+        ("admin-api.spdx.json", "dns-server.spdx.json"),
+        repositories,
+    ):
+        image = require_object(image, f"image SBOM manifest entry {component}")
+        sbom = image.get("sbom")
+        receipt_digest = require_object(
+            receipt_image, f"publication image {component}"
+        ).get("digest")
+        metadata = expected[filename]
+        if (
+            not isinstance(sbom, dict)
+            or image.get("component") != component
+            or image.get("repository") != repository
+            or image.get("digest") != receipt_digest
+            or sbom.get("filename") != filename
+            or sbom.get("sha256")
+            != metadata["digest"].removeprefix("sha256:")
+        ):
+            fail(f"image SBOM manifest entry differs for {component}")
+    return expected
+
+
 def validate_uploaded_assets(
     assets: list[dict[str, Any]], expected: dict[str, dict[str, Any]]
 ) -> None:
@@ -263,17 +561,12 @@ def main() -> int:
         fail("publisher supports only the canonical GitHub API endpoint")
     upload_api = "https://uploads.github.com"
 
-    manifest, _ = load_manifest(asset_dir / "release-assets-manifest.json")
+    manifest, _ = load_manifest(
+        asset_dir / "release-assets-manifest.json", canonical=True
+    )
     version = tag[1:]
-    if (
-        manifest.get("version") != version
-        or manifest.get("tag") != tag
-        or manifest.get("source", {}).get("repository") != CANONICAL_SOURCE
-        or manifest.get("source", {}).get("commit") != commit
-    ):
-        fail("local release-assets manifest identity differs from the requested release")
-    expected = expected_asset_metadata(asset_dir, version)
     receipt, _ = load_manifest(asset_dir / "container-publication-manifest.json")
+    expected = validate_local_handoff(asset_dir, manifest, receipt, tag, commit)
     title = f"DNS Platform {tag}"
     notes = release_notes(tag, commit, receipt)
 
@@ -415,18 +708,26 @@ def main() -> int:
     return 0
 
 
-def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
+def load_manifest(path: Path, *, canonical: bool = False) -> tuple[dict[str, Any], bytes]:
     if not path.is_file() or path.is_symlink():
         fail(f"manifest must be a regular non-symlink file: {path.name}")
     raw = path.read_bytes()
     if not raw.endswith(b"\n") or raw.endswith(b"\n\n") or b"\r" in raw:
         fail(f"manifest line endings are invalid: {path.name}")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, DuplicateKeyError) as error:
         fail(f"manifest is not valid UTF-8 JSON: {path.name} ({error})")
     if not isinstance(value, dict):
         fail(f"manifest root must be an object: {path.name}")
+    if canonical:
+        expected = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode(
+            "utf-8"
+        )
+        if raw != expected:
+            fail(f"manifest is not canonically serialized: {path.name}")
     return value, raw
 
 

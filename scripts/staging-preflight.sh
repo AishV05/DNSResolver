@@ -49,6 +49,8 @@ if [[ "${USE_BOOTSTRAP}" == true && "${INITIALIZE_FLEET_METRICS}" == true ]]; th
     staging_fail '--bootstrap and --initialize-fleet-metrics are mutually exclusive'
 fi
 
+staging_reject_inherited_container_controls
+
 for command in docker python3 cmp sed sort; do
     staging_require_command "${command}"
 done
@@ -61,12 +63,22 @@ staging_resolve_inputs \
     "${USE_BOOTSTRAP}" \
     true \
     "${INITIALIZE_FLEET_METRICS}"
-if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
-    current_file="${STAGING_CFG_STATE_DIR}/current"
+current_file="${STAGING_CFG_STATE_DIR}/current"
+current_key=''
+if [[ -e "${current_file}" || -L "${current_file}" ]]; then
     [[ -f "${current_file}" && ! -L "${current_file}" ]] \
-        || staging_fail '--initialize-fleet-metrics requires a recorded current release'
+        || staging_fail 'current deployment state must be a regular non-symlink file'
     current_key="$(staging_read_current_release "${current_file}")" \
         || staging_fail 'current deployment state contains an invalid release identity'
+    target_identity="$(staging_release_identity)"
+    target_tag="$(printf '%s\n' "${target_identity}" | sed -n '1p')"
+    target_commit="$(printf '%s\n' "${target_identity}" | sed -n '2p')"
+    staging_require_forward_promotion \
+        "${target_tag}" "${target_commit}" "${current_key}"
+elif [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
+    staging_fail '--initialize-fleet-metrics requires a recorded current release'
+fi
+if [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
     current_bundle="${STAGING_CFG_STATE_DIR}/releases/${current_key}"
     "${SCRIPT_DIR}/verify-staging-deployment-bundle.sh" \
         "${current_bundle}" \

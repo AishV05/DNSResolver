@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SIGNER_WORKFLOW="AishV05/DNSResolver/.github/workflows/release-publish.yml"
 ATTESTATION_REPOSITORY="AishV05/DNSResolver"
+SLSA_PREDICATE="https://slsa.dev/provenance/v1"
 SPDX_PREDICATE="https://spdx.dev/Document/v2.3"
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
@@ -112,14 +113,17 @@ verify_image() {
         --limit 100
     )
 
-    gh attestation verify "${common[@]}" >/dev/null
+    gh attestation verify "${common[@]}" \
+        --predicate-type "${SLSA_PREDICATE}" >/dev/null
     gh attestation verify "${common[@]}" \
         --predicate-type "${SPDX_PREDICATE}" \
         --format json >"${TEMP_DIR}/${component}-api-spdx.json"
     verify_predicate_matches_file \
         "${TEMP_DIR}/${component}-api-spdx.json" "${sbom_file}"
 
-    gh attestation verify "${common[@]}" --bundle-from-oci >/dev/null
+    gh attestation verify "${common[@]}" \
+        --bundle-from-oci \
+        --predicate-type "${SLSA_PREDICATE}" >/dev/null
     gh attestation verify "${common[@]}" \
         --bundle-from-oci \
         --predicate-type "${SPDX_PREDICATE}" \

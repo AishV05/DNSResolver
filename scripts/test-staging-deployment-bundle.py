@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import unittest
 
+from staging_compose_test_fixture import rendered_staging_compose
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERIFIER = REPO_ROOT / "scripts" / "verify-staging-deployment-bundle.sh"
@@ -511,6 +513,16 @@ class StagingConfigurationTest(unittest.TestCase):
         self.config = self.root / "staging.env"
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
+        self.rendered_config = self.root / "rendered-compose.json"
+        self.rendered_bootstrap_config = self.root / "rendered-bootstrap-compose.json"
+        _write_json(
+            self.rendered_config,
+            rendered_staging_compose(self.bundle, self.secrets),
+        )
+        _write_json(
+            self.rendered_bootstrap_config,
+            rendered_staging_compose(self.bundle, self.secrets, bootstrap=True),
+        )
         self._write_fake_docker()
 
     def tearDown(self) -> None:
@@ -566,6 +578,12 @@ class StagingConfigurationTest(unittest.TestCase):
             "case \" $* \" in\n"
             "  ' compose version ') exit 0 ;;\n"
             "  *' version --format '*) printf '%s\\n' 'linux/amd64'; exit 0 ;;\n"
+            "  *' config --format json '*)\n"
+            "    if [[ \" $* \" == *'compose.bootstrap.yaml '* ]]; then\n"
+            f"      exec /bin/cat '{self.rendered_bootstrap_config}'\n"
+            "    fi\n"
+            f"    exec /bin/cat '{self.rendered_config}'\n"
+            "    ;;\n"
             "  *' config --quiet '*) exit 0 ;;\n"
             "  *' config --images '*)\n"
             + "".join(f"    printf '%s\\n' '{image}'\n" for image in images)
@@ -596,6 +614,18 @@ class StagingConfigurationTest(unittest.TestCase):
         result = self._preflight()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Staging preflight passed", result.stdout)
+
+    def test_rendered_compose_attack_is_rejected_before_pull(self) -> None:
+        model = json.loads(self.rendered_config.read_text(encoding="utf-8"))
+        model["services"]["admin-api"]["privileged"] = True
+        _write_json(self.rendered_config, model)
+        self._write_config()
+
+        result = self._preflight("--pull")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privileged", result.stderr)
+        self.assertNotIn("unexpected fake Docker call", result.stderr)
 
     def test_bootstrap_preflight_uses_separate_bootstrap_token(self) -> None:
         (self.secrets / "admin-operator-token").unlink()

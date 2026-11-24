@@ -46,6 +46,8 @@ case "${COMPONENT}" in
         EXPECTED_ENTRYPOINT="/app/dns-admin-api.jar"
         EXPECTED_PORT="8081/tcp"
         EXPECTED_JAR_BASENAME="admin-api-${RELEASE_VERSION}.jar"
+        EXPECTED_ENVIRONMENT_NAME="DNS_ADMIN_BIND_ADDRESS"
+        EXPECTED_ENVIRONMENT_VALUE="0.0.0.0"
         ;;
     dns-server)
         DEFAULT_REPOSITORY="ghcr.io/aishv05/dns-resolver"
@@ -55,6 +57,8 @@ case "${COMPONENT}" in
         EXPECTED_ENTRYPOINT="/app/dns-resolver.jar"
         EXPECTED_PORT="5354/tcp,5354/udp"
         EXPECTED_JAR_BASENAME="dns-server-${RELEASE_VERSION}.jar"
+        EXPECTED_ENVIRONMENT_NAME="DNS_APPLICATION_VERSION"
+        EXPECTED_ENVIRONMENT_VALUE="${RELEASE_VERSION}"
         ;;
     *)
         fail "component must be admin-api or dns-server"
@@ -137,7 +141,9 @@ python3 - \
     "${CANONICAL_REPOSITORY}" \
     "${RELEASE_VERSION}" \
     "${SOURCE_COMMIT}" \
-    "${EXPECTED_CREATED}" <<'PY'
+    "${EXPECTED_CREATED}" \
+    "${EXPECTED_ENVIRONMENT_NAME}" \
+    "${EXPECTED_ENVIRONMENT_VALUE}" <<'PY'
 import json
 import os
 import re
@@ -153,6 +159,8 @@ import sys
     expected_version,
     expected_revision,
     expected_created,
+    expected_environment_name,
+    expected_environment_value,
 ) = sys.argv[1:]
 expected_ports = set(expected_port.split(","))
 
@@ -206,6 +214,23 @@ if config.get("Entrypoint") != ["java", "-jar", expected_entrypoint]:
 ports = config.get("ExposedPorts")
 if not isinstance(ports, dict) or set(ports) != expected_ports:
     fail(f"{component} image exposes an unexpected port set")
+
+environment = config.get("Env")
+if not isinstance(environment, list) or not all(
+    isinstance(item, str) and "=" in item for item in environment
+):
+    fail(f"{component} image environment is invalid")
+environment_values = {}
+for item in environment:
+    name, value = item.split("=", 1)
+    if name in environment_values:
+        fail(f"{component} image environment contains duplicate {name}")
+    environment_values[name] = value
+if environment_values.get(expected_environment_name) != expected_environment_value:
+    fail(
+        f"{component} image {expected_environment_name} differs from "
+        "the release runtime contract"
+    )
 
 print(f"Release image verified: {component} {image_id}")
 PY

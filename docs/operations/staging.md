@@ -17,7 +17,9 @@ reader token. The host is a single failure domain, and management HTTP has no pu
 TLS ingress.
 
 The design is recorded in
-[ADR 0012](../adr/0012-private-single-host-staging.md).
+[ADR 0012](../adr/0012-private-single-host-staging.md). The workflow trust and
+operation-evidence boundary is recorded in
+[ADR 0032](../adr/0032-trusted-staging-promotion.md).
 
 ## External prerequisites
 
@@ -27,22 +29,30 @@ Before the first deployment:
    packages must remain linked to this repository and readable by the staging
    deployment identity.
 2. Prepare one dedicated, patched Linux/AMD64 host with Docker Engine, the
-   Docker Compose plugin, Python 3, Git, `flock`, and sufficient persistent
+   Docker Compose plugin, Python 3, `flock`, and sufficient persistent
    storage. Do not reuse a developer workstation or a general pull-request
    runner.
 3. Assign the host a private RFC1918 address. Allow inbound UDP and TCP 5354
    only from approved test-client CIDRs. Allow outbound UDP/TCP 53 for recursion
    and TCP 443 for registry access. Keep TCP 8081, 9090, and 3000 on host loopback.
    Check the cloud/network ACL and Docker firewall path explicitly.
-4. Register a dedicated GitHub Actions runner with labels
+4. Create a runner group named `dns-staging` that accepts only the staging
+   workflow, then register a dedicated runner in that group with labels
    `self-hosted`, `linux`, `x64`, and `dns-staging`. It must accept only trusted
    staging deployment work, never pull-request jobs. Access to Docker is
    root-equivalent; isolate and patch the runner accordingly.
 5. Create a GitHub environment named `staging`. Require a reviewer, prevent
-   self-review and administrator bypass where supported, and allow only `v*`
-   tags. Add no runtime secret. Optionally set the non-secret environment
-   variable `STAGING_CONFIG_FILE`; the default is
-   `/etc/dns-platform/staging/staging.env`.
+   self-review and administrator bypass where supported, and restrict
+   deployment to `main`; the immutable tag is a data input rather than the
+   workflow ref. Add no runtime secret. Set both required, non-secret
+   environment variables: `STAGING_CONFIG_FILE` to the absolute host path
+   `/etc/dns-platform/staging/staging.env`, and
+   `STAGING_ENVIRONMENT_MARKER` to `dns-platform-private-staging-v1`. There is
+   no fallback value. Do not define either variable name at organization or
+   repository scope: GitHub's `vars` context can inherit those scopes, which
+   would defeat the missing-environment check. With that external setting
+   audited, the marker fails closed when the intended environment was not
+   configured, but it still does not prove that reviewer rules are enabled.
 6. Provide encrypted/off-host storage for database backups. A Compose volume
    is persistent state, not a backup.
 
@@ -126,27 +136,34 @@ and the fact that `_FILE` support belongs to each image: [Docker Compose secrets
 
 ## Prepare a deployment bundle manually
 
-From a clean checkout of the exact annotated release tag:
+From a clean, complete checkout whose `HEAD` is the exact canonical
+`origin/main` tip, with the annotated release tag fetched locally:
 
 ```bash
 export RELEASE_TAG=v0.1.0
 export SOURCE_COMMIT="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+export STAGING_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dns-staging-release.XXXXXX")"
 
 ./scripts/verify-github-release.sh \
-  "${RELEASE_TAG}" "${SOURCE_COMMIT}" verified-release-v0.1.0
+  "${RELEASE_TAG}" "${SOURCE_COMMIT}" \
+  "${STAGING_WORK_DIR}/verified-release"
 
 ./scripts/create-staging-deployment-bundle.sh \
-  verified-release-v0.1.0 staging-deployment-v0.1.0
+  "${STAGING_WORK_DIR}/verified-release" \
+  "${STAGING_WORK_DIR}/staging-deployment"
 
 ./scripts/staging-preflight.sh \
-  staging-deployment-v0.1.0 \
+  "${STAGING_WORK_DIR}/staging-deployment" \
   /etc/dns-platform/staging/staging.env \
   --bootstrap --pull
 ```
 
-Bundle creation requires a clean, complete checkout whose `HEAD`, annotated
-tag, canonical `origin/main`, immutable release identity, and publication receipt
-all agree. The output contains exactly:
+Bundle creation requires a clean, complete trusted-main checkout. Its verifier
+uses a detached clean Git view of the release commit while continuing to run
+the trusted-main scripts and schemas; its assembler copies only the allowlisted
+Compose and observability blobs from that release tree. The annotated tag,
+canonical `origin/main`, immutable release identity, and publication receipt
+must all agree. The output contains exactly:
 
 ```text
 SHA256SUMS
@@ -352,19 +369,45 @@ path.
 
 ## GitHub Actions deployment
 
-Run **Staging deploy** manually from the release tag, not from `main`, and enter
-the same tag in the `tag` input. Select `bootstrap` only for the first empty
-database initialization. Select `initialize_fleet_metrics` only for the
-one-time verified transition described above; the two options are mutually
-exclusive.
+Run **Staging deploy** manually from `main` and enter the existing immutable
+release tag in the `tag` input. On an initialized host, leave the operation at
+its default `preflight` first. It pulls and validates the exact images but does
+not change the Compose application state; its evidence status is
+`preflight-passed`, not `healthy`. Rehearse an empty host manually with the
+documented `staging-preflight.sh --bootstrap --pull` command before choosing
+`bootstrap`. Choose `deploy` for an ordinary forward promotion or exact reapplication, and
+`initialize-fleet-metrics` only for the one-time verified transition described
+above.
 
-The hosted preparation job independently verifies the immutable GitHub Release,
-GHCR digests, SBOMs, and attestations, then uploads a seven-day deployment
-handoff. The protected job runs only on the dedicated `dns-staging` runner,
-rechecks the handoff checksum, logs into GHCR with a temporary Docker config and
-read-only job token, invokes the same host deployment script, logs out, and
-uploads non-secret deployment evidence. It has no package-write, contents-write,
-OIDC, SSH, cloud, or production permission.
+Two isolated hosted preparation jobs handle the identities in sequence. The
+first checks out only the `main` workflow commit and uploads a minimal,
+checksum-bound tooling handoff. After that artifact exists, another hosted
+runner checks out the same trusted-main commit, verifies the immutable release,
+and reads only allowlisted data blobs from the annotated tag while producing
+the digest-bound release-data handoff. No release-tag script is executed. The
+protected job downloads both on the named
+`dns-staging` runner group without checking out repository source and without
+contents permission. It verifies the outer identities, exact inventories,
+inner checksums, schemas, tooling commit, and release commit before executing
+the handoff. The job logs into GHCR using a fresh private Docker configuration,
+unsets the raw username and token before any staging script runs, performs the
+explicit operation, logs out, and removes the fresh workspace.
+
+Successful operations upload exactly four evidence files:
+
+```text
+SHA256SUMS
+bundle-SHA256SUMS
+deployment-result.json
+staging-deployment-manifest.json
+```
+
+The result binds the operation/status, release tag and commit, both application
+and infrastructure image digests, trusted tooling commit, workflow run and
+attempt, and the whole bundle-checksum digest. A final GitHub-hosted job with
+only `actions: read` downloads and verifies that evidence. This proves the
+approved host job's canonical assertion; it does not independently prove
+firewall policy, reviewer settings, runner exclusivity, or off-host backup.
 
 The workflow cannot create the host, firewall, runner, GitHub environment,
 secret files, GHCR package access, or off-host backup target. Until those
@@ -480,6 +523,12 @@ database automatically. If Flyway state changed, stop and review migration
 compatibility. Restoring a backup can discard later writes and therefore needs
 a separate approval, an isolated restore rehearsal, and an explicit recovery
 procedure.
+
+The normal deploy and preflight commands allow a first install, exact current
+release reapplication, or a strictly newer SemVer release. They reject an
+older version or the same immutable tag at a different commit before image
+pull, backup, or Compose mutation. Do not use the normal workflow as an
+implicit rollback path.
 
 Never use `docker compose down -v`, volume pruning, a moved image tag, direct
 database edits, or release deletion as rollback.

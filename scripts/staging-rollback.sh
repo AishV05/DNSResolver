@@ -16,6 +16,8 @@ if [[ $# -ne 3 || "$3" != "${ACK}" ]]; then
     exit 2
 fi
 
+staging_reject_inherited_container_controls
+
 for command in docker python3 flock cmp grep sed sort; do
     staging_require_command "${command}"
 done

@@ -7,16 +7,16 @@ on:
         description: Existing immutable vMAJOR.MINOR.PATCH release tag
         required: true
         type: string
-      bootstrap:
-        description: Use the first-start bootstrap secret overlay
+      operation:
+        description: Explicit private-staging operation
         required: true
-        default: false
-        type: boolean
-      initialize_fleet_metrics:
-        description: One-time upgrade from a verified pre-fleet-metrics staging release
-        required: true
-        default: false
-        type: boolean
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - deploy
+          - bootstrap
+          - initialize-fleet-metrics
 
 permissions:
   contents: read
@@ -26,8 +26,119 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare-staging-tooling:
+    name: Prepare trusted staging tooling
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      bundle_artifact_name: ${{ steps.identity.outputs.bundle_artifact_name }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      tooling_artifact_name: ${{ steps.identity.outputs.tooling_artifact_name }}
+      tooling_checksums_sha256: ${{ steps.identity.outputs.tooling_checksums_sha256 }}
+      tooling_commit: ${{ steps.identity.outputs.tooling_commit }}
+    env:
+      OPERATION: ${{ inputs.operation }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate main-dispatched promotion identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "AishV05/DNSResolver" ]]; then
+            printf 'Unexpected repository: %s\n' "${GITHUB_REPOSITORY}" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            printf '%s\n' 'Staging must be dispatched from canonical main.' >&2
+            exit 1
+          fi
+          if [[ ! "${GITHUB_SHA}" =~ ^[a-f0-9]{40}$ ]]; then
+            printf '%s\n' 'Workflow tooling commit is not a full commit identity.' >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Invalid release tag: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          case "${OPERATION}" in
+            preflight|deploy|bootstrap|initialize-fleet-metrics) ;;
+            *)
+              printf 'Invalid staging operation: %s\n' "${OPERATION}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check out trusted staging tooling from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: trusted-main
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Create the exact trusted-main tooling handoff
+        working-directory: trusted-main
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/create-staging-tooling-handoff.sh \
+            "${RUNNER_TEMP}/staging-tooling"
+
+      - name: Record the immutable trusted-main tooling identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tooling_commit="$(git -C trusted-main rev-parse HEAD)"
+          if [[ "${tooling_commit}" != "${GITHUB_SHA}" ]]; then
+            printf '%s\n' 'Trusted tooling checkout differs from workflow commit.' >&2
+            exit 1
+          fi
+          if [[ "${tooling_commit}" != "$(git -C trusted-main rev-parse refs/remotes/origin/main)" ]]; then
+            printf '%s\n' 'Trusted tooling commit is no longer canonical main.' >&2
+            exit 1
+          fi
+          if [[ "$(git -C trusted-main cat-file -t "refs/tags/${RELEASE_TAG}")" != tag ]]; then
+            printf '%s\n' 'Release tag must be annotated.' >&2
+            exit 1
+          fi
+          source_commit="$(git -C trusted-main rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          if [[ ! "${source_commit}" =~ ^[a-f0-9]{40}$ ]]; then
+            printf '%s\n' 'Release tag does not identify a full commit.' >&2
+            exit 1
+          fi
+          if ! git -C trusted-main merge-base --is-ancestor \
+              "${source_commit}" refs/remotes/origin/main; then
+            printf '%s\n' 'Release commit is not reachable from canonical main.' >&2
+            exit 1
+          fi
+          tooling_checksum="$(sha256sum "${RUNNER_TEMP}/staging-tooling/SHA256SUMS" | cut -d' ' -f1)"
+          bundle_artifact="staging-bundle-${RELEASE_TAG}-${source_commit}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          tooling_artifact="staging-tooling-${tooling_commit}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'bundle_artifact_name=%s\n' "${bundle_artifact}" >>"${GITHUB_OUTPUT}"
+          printf 'release_tag=%s\n' "${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+          printf 'source_commit=%s\n' "${source_commit}" >>"${GITHUB_OUTPUT}"
+          printf 'tooling_artifact_name=%s\n' "${tooling_artifact}" >>"${GITHUB_OUTPUT}"
+          printf 'tooling_checksums_sha256=%s\n' "${tooling_checksum}" >>"${GITHUB_OUTPUT}"
+          printf 'tooling_commit=%s\n' "${tooling_commit}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload the verified trusted-main tooling handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.identity.outputs.tooling_artifact_name }}
+          path: ${{ runner.temp }}/staging-tooling/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   prepare-staging-bundle:
-    name: Prepare verified staging bundle
+    name: Prepare verified release-data bundle
+    needs: prepare-staging-tooling
+    if: github.repository == 'AishV05/DNSResolver'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -35,52 +146,40 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    outputs:
-      artifact_name: ${{ steps.identity.outputs.artifact_name }}
-      bundle_checksums_sha256: ${{ steps.identity.outputs.bundle_checksums_sha256 }}
-      source_commit: ${{ steps.identity.outputs.source_commit }}
-      release_tag: ${{ steps.identity.outputs.release_tag }}
     env:
+      EXPECTED_SOURCE_COMMIT: ${{ needs.prepare-staging-tooling.outputs.source_commit }}
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ needs.prepare-staging-tooling.outputs.release_tag }}
     steps:
-      - name: Validate manual release identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            printf 'Invalid release tag: %s\n' "${RELEASE_TAG}" >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REF}" != "refs/tags/${RELEASE_TAG}" ]]; then
-            printf '%s\n' \
-              'Run this workflow from the same immutable tag selected in the tag input.' >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REPOSITORY}" != "AishV05/DNSResolver" ]]; then
-            printf 'Unexpected repository: %s\n' "${GITHUB_REPOSITORY}" >&2
-            exit 1
-          fi
-
-      - name: Check out the immutable release tag
+      - name: Check out the trusted release-data assembler from main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          path: trusted-assembler
           persist-credentials: false
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
 
-      - name: Resolve annotated tag commit
-        id: source
+      - name: Resolve the annotated release commit
+        id: release
+        working-directory: trusted-assembler
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]]; then
+            printf '%s\n' 'Release-data assembler differs from the workflow commit.' >&2
+            exit 1
+          fi
           if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != tag ]]; then
             printf '%s\n' 'Release tag must be annotated.' >&2
             exit 1
           fi
           source_commit="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
-          if [[ "$(git rev-parse HEAD)" != "${source_commit}" ]]; then
-            printf '%s\n' 'Checked-out commit differs from the annotated release tag.' >&2
+          if [[ "${source_commit}" != "${EXPECTED_SOURCE_COMMIT}" ]]; then
+            printf '%s\n' 'Release tag moved after trusted identity resolution.' >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main; then
+            printf '%s\n' 'Release commit is not reachable from canonical main.' >&2
             exit 1
           fi
           printf 'source_commit=%s\n' "${source_commit}" >>"${GITHUB_OUTPUT}"
@@ -92,10 +191,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Verify immutable release and signed image evidence
+      - name: Verify the immutable release and signed evidence
+        working-directory: trusted-assembler
         shell: bash
         env:
-          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
         run: |
           set -euo pipefail
           ./scripts/verify-github-release.sh \
@@ -103,7 +203,8 @@ jobs:
             "${SOURCE_COMMIT}" \
             "${RUNNER_TEMP}/verified-release"
 
-      - name: Create deterministic staging deployment bundle
+      - name: Create the digest-bound staging bundle
+        working-directory: trusted-assembler
         shell: bash
         run: |
           set -euo pipefail
@@ -111,157 +212,436 @@ jobs:
             "${RUNNER_TEMP}/verified-release" \
             "${RUNNER_TEMP}/staging-deployment"
 
-      - name: Record deployment handoff identity
-        id: identity
+      - name: Remove preparation registry credentials
+        if: always()
         shell: bash
-        env:
-          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
-        run: |
-          set -euo pipefail
-          checksum="$(sha256sum "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" | cut -d' ' -f1)"
-          artifact="staging-deployment-${RELEASE_TAG}-${SOURCE_COMMIT}-${GITHUB_RUN_ATTEMPT}"
-          printf 'artifact_name=%s\n' "${artifact}" >>"${GITHUB_OUTPUT}"
-          printf 'bundle_checksums_sha256=%s\n' "${checksum}" >>"${GITHUB_OUTPUT}"
-          printf 'source_commit=%s\n' "${SOURCE_COMMIT}" >>"${GITHUB_OUTPUT}"
-          printf 'release_tag=%s\n' "${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+        run: docker logout ghcr.io
 
-      - name: Upload verified staging handoff
+      - name: Upload the verified release-data handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.identity.outputs.artifact_name }}
-          path: ${{ runner.temp }}/staging-deployment
+          name: ${{ needs.prepare-staging-tooling.outputs.bundle_artifact_name }}
+          path: ${{ runner.temp }}/staging-deployment/
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
 
-  deploy-private-staging:
-    name: Deploy private staging
-    needs: prepare-staging-bundle
+  operate-private-staging:
+    name: Operate private staging
+    needs:
+      - prepare-staging-tooling
+      - prepare-staging-bundle
+    if: github.repository == 'AishV05/DNSResolver'
     runs-on:
-      - self-hosted
-      - linux
-      - x64
-      - dns-staging
+      group: dns-staging
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - dns-staging
     timeout-minutes: 30
     environment:
       name: staging
     permissions:
       actions: read
-      contents: read
       packages: read
+    outputs:
+      evidence_artifact_name: ${{ steps.operate.outputs.evidence_artifact_name }}
+      evidence_checksums_sha256: ${{ steps.operate.outputs.evidence_checksums_sha256 }}
     env:
-      EXPECTED_CHECKSUM: ${{ needs.prepare-staging-bundle.outputs.bundle_checksums_sha256 }}
-      RELEASE_TAG: ${{ needs.prepare-staging-bundle.outputs.release_tag }}
-      SOURCE_COMMIT: ${{ needs.prepare-staging-bundle.outputs.source_commit }}
-      STAGING_CONFIG_FILE: ${{ vars.STAGING_CONFIG_FILE || '/etc/dns-platform/staging/staging.env' }}
-      USE_BOOTSTRAP: ${{ inputs.bootstrap }}
-      INITIALIZE_FLEET_METRICS: ${{ inputs.initialize_fleet_metrics }}
+      OPERATION: ${{ inputs.operation }}
+      RELEASE_TAG: ${{ needs.prepare-staging-tooling.outputs.release_tag }}
+      SOURCE_COMMIT: ${{ needs.prepare-staging-tooling.outputs.source_commit }}
+      TOOLING_CHECKSUM: ${{ needs.prepare-staging-tooling.outputs.tooling_checksums_sha256 }}
+      TOOLING_COMMIT: ${{ needs.prepare-staging-tooling.outputs.tooling_commit }}
     steps:
-      - name: Check out deployment tooling from the release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Download exact verified staging handoff
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.prepare-staging-bundle.outputs.artifact_name }}
-          path: ${{ runner.temp }}/staging-deployment
-
-      - name: Revalidate handoff and trusted source identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          actual_checksum="$(sha256sum "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" | cut -d' ' -f1)"
-          if [[ "${actual_checksum}" != "${EXPECTED_CHECKSUM}" ]]; then
-            printf '%s\n' 'Downloaded deployment handoff checksum differs.' >&2
-            exit 1
-          fi
-          if [[ "$(git rev-parse HEAD)" != "${SOURCE_COMMIT}" ]]; then
-            printf '%s\n' 'Deployment tooling checkout differs from release commit.' >&2
-            exit 1
-          fi
-          ./scripts/verify-staging-deployment-bundle.sh \
-            "${RUNNER_TEMP}/staging-deployment"
-
-      - name: Deploy exact release to private staging
+      - name: Create a fresh private operation workspace
+        id: workspace
         shell: bash
         env:
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ github.token }}
+          STAGING_CONFIG_FILE: ${{ vars.STAGING_CONFIG_FILE }}
+          STAGING_ENVIRONMENT_MARKER: ${{ vars.STAGING_ENVIRONMENT_MARKER }}
         run: |
           set -euo pipefail
           umask 077
-          docker_config="$(mktemp -d "${RUNNER_TEMP}/docker-config.XXXXXX")"
-          cleanup() {
+          if [[ "${STAGING_ENVIRONMENT_MARKER}" != "dns-platform-private-staging-v1" ]]; then
+            printf '%s\n' 'The reviewed staging environment marker is absent.' >&2
+            exit 1
+          fi
+          if [[ "${STAGING_CONFIG_FILE}" != /* || "${STAGING_CONFIG_FILE}" == *$'\n'* ]]; then
+            printf '%s\n' 'STAGING_CONFIG_FILE must be an absolute single-line path.' >&2
+            exit 1
+          fi
+          root="$(mktemp -d "${RUNNER_TEMP}/dns-staging.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          chmod 700 "${root}"
+          mkdir -m 700 "${root}/bundle" "${root}/tooling"
+          printf 'root=%s\n' "${root}" >>"${GITHUB_OUTPUT}"
+          printf 'bundle=%s\n' "${root}/bundle" >>"${GITHUB_OUTPUT}"
+          printf 'config_file=%s\n' "${STAGING_CONFIG_FILE}" >>"${GITHUB_OUTPUT}"
+          printf 'evidence=%s\n' "${root}/evidence" >>"${GITHUB_OUTPUT}"
+          printf 'tooling=%s\n' "${root}/tooling" >>"${GITHUB_OUTPUT}"
+
+      - name: Download the exact release-data handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-staging-tooling.outputs.bundle_artifact_name }}
+          path: ${{ steps.workspace.outputs.bundle }}
+
+      - name: Download the exact trusted-main tooling handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-staging-tooling.outputs.tooling_artifact_name }}
+          path: ${{ steps.workspace.outputs.tooling }}
+
+      - name: Verify both handoffs before executing trusted tooling
+        id: handoffs
+        shell: bash
+        env:
+          BUNDLE_DIR: ${{ steps.workspace.outputs.bundle }}
+          TOOLING_DIR: ${{ steps.workspace.outputs.tooling }}
+        run: |
+          set -euo pipefail
+          for value in "${TOOLING_CHECKSUM}"; do
+            [[ "${value}" =~ ^[a-f0-9]{64}$ ]] || {
+              printf '%s\n' 'A handoff checksum identity is invalid.' >&2
+              exit 1
+            }
+          done
+          for directory in "${BUNDLE_DIR}" "${TOOLING_DIR}"; do
+            [[ -d "${directory}" && ! -L "${directory}" ]] || {
+              printf '%s\n' 'A downloaded handoff directory is unsafe.' >&2
+              exit 1
+            }
+            if find "${directory}" -type l -print -quit | grep -q .; then
+              printf '%s\n' 'A downloaded handoff contains a symbolic link.' >&2
+              exit 1
+            fi
+          done
+          tooling_actual="$(sha256sum "${TOOLING_DIR}/SHA256SUMS" | cut -d' ' -f1)"
+          [[ "${tooling_actual}" == "${TOOLING_CHECKSUM}" ]] || {
+            printf '%s\n' 'Trusted-main tooling handoff checksum differs.' >&2
+            exit 1
+          }
+          (cd "${TOOLING_DIR}" && sha256sum --check --strict SHA256SUMS)
+
+          chmod 755 "${TOOLING_DIR}/release" "${TOOLING_DIR}/scripts"
+          chmod 644 \
+            "${TOOLING_DIR}/SHA256SUMS" \
+            "${TOOLING_DIR}/staging-tooling-manifest.json" \
+            "${TOOLING_DIR}"/release/*.json \
+            "${TOOLING_DIR}/scripts/provision-policy-reader.py"
+          chmod 755 \
+            "${TOOLING_DIR}/scripts/create-staging-operation-evidence.py" \
+            "${TOOLING_DIR}/scripts/provision-fleet-metrics-reader.py" \
+            "${TOOLING_DIR}/scripts/provision-resolver-agent.py" \
+            "${TOOLING_DIR}/scripts/staging-backup.sh" \
+            "${TOOLING_DIR}/scripts/staging-common.sh" \
+            "${TOOLING_DIR}/scripts/staging-deploy.sh" \
+            "${TOOLING_DIR}/scripts/staging-preflight.sh" \
+            "${TOOLING_DIR}/scripts/staging-smoke.py" \
+            "${TOOLING_DIR}/scripts/validate-json-schema.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-compose-config.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-deployment-bundle.sh" \
+            "${TOOLING_DIR}/scripts/verify-staging-operation-evidence.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-tooling-handoff.sh"
+
+          "${TOOLING_DIR}/scripts/verify-staging-tooling-handoff.sh" \
+            "${TOOLING_DIR}"
+          "${TOOLING_DIR}/scripts/verify-staging-deployment-bundle.sh" \
+            "${BUNDLE_DIR}"
+          bundle_actual="$(sha256sum "${BUNDLE_DIR}/SHA256SUMS" | cut -d' ' -f1)"
+          printf 'bundle_checksum=%s\n' "${bundle_actual}" >>"${GITHUB_OUTPUT}"
+
+          python3 - \
+            "${TOOLING_DIR}/staging-tooling-manifest.json" \
+            "${BUNDLE_DIR}/staging-deployment-manifest.json" \
+            "${TOOLING_COMMIT}" "${RELEASE_TAG}" "${SOURCE_COMMIT}" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise SystemExit(f"duplicate JSON field: {key}")
+                  value[key] = item
+              return value
+
+          tooling = json.loads(
+              Path(sys.argv[1]).read_text(encoding="utf-8"),
+              object_pairs_hook=unique,
+          )
+          deployment = json.loads(
+              Path(sys.argv[2]).read_text(encoding="utf-8"),
+              object_pairs_hook=unique,
+          )
+          tooling_commit, tag, source_commit = sys.argv[3:]
+          if re.fullmatch(r"[a-f0-9]{40}", tooling_commit) is None:
+              raise SystemExit("expected tooling commit is invalid")
+          if tooling.get("source", {}).get("commit") != tooling_commit:
+              raise SystemExit("tooling handoff identifies another commit")
+          if deployment.get("tag") != tag:
+              raise SystemExit("deployment handoff identifies another tag")
+          if deployment.get("source", {}).get("commit") != source_commit:
+              raise SystemExit("deployment handoff identifies another source commit")
+          PY
+
+      - name: Execute the explicit staging operation
+        id: operate
+        shell: bash
+        env:
+          BUNDLE_DIR: ${{ steps.workspace.outputs.bundle }}
+          BUNDLE_CHECKSUM: ${{ steps.handoffs.outputs.bundle_checksum }}
+          EVIDENCE_DIR: ${{ steps.workspace.outputs.evidence }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          STAGING_CONFIG_FILE: ${{ steps.workspace.outputs.config_file }}
+          TOOLING_DIR: ${{ steps.workspace.outputs.tooling }}
+        run: |
+          set -euo pipefail
+          umask 077
+          docker_config="$(mktemp -d "${RUNNER_TEMP}/docker-config.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          cleanup_registry() {
             local exit_code=$?
             trap - EXIT INT TERM
             DOCKER_CONFIG="${docker_config}" docker logout ghcr.io >/dev/null 2>&1 || true
-            rm -rf "${docker_config}"
-            unset GHCR_TOKEN
+            rm -rf -- "${docker_config}"
+            unset GHCR_TOKEN GHCR_USER
             exit "${exit_code}"
           }
-          trap cleanup EXIT
+          trap cleanup_registry EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
-          printf '%s' "${GHCR_TOKEN}" \
-            | DOCKER_CONFIG="${docker_config}" docker login ghcr.io \
-                --username "${GHCR_USER}" --password-stdin
           export DOCKER_CONFIG="${docker_config}"
-          arguments=(
-            "${RUNNER_TEMP}/staging-deployment"
-            "${STAGING_CONFIG_FILE}"
-          )
-          if [[ "${USE_BOOTSTRAP}" == true \
-              && "${INITIALIZE_FLEET_METRICS}" == true ]]; then
-            printf '%s\n' \
-              'bootstrap and initialize_fleet_metrics are mutually exclusive' >&2
+          if ! printf '%s' "${GHCR_TOKEN}" \
+              | docker login ghcr.io --username "${GHCR_USER}" --password-stdin; then
+            unset GHCR_TOKEN GHCR_USER
             exit 1
           fi
-          if [[ "${USE_BOOTSTRAP}" == true ]]; then
-            arguments+=(--bootstrap)
-          elif [[ "${INITIALIZE_FLEET_METRICS}" == true ]]; then
-            arguments+=(--initialize-fleet-metrics)
-          fi
-          ./scripts/staging-deploy.sh "${arguments[@]}"
+          unset GHCR_TOKEN GHCR_USER
 
-      - name: Record non-secret deployment evidence
+          case "${OPERATION}" in
+            preflight)
+              "${TOOLING_DIR}/scripts/staging-preflight.sh" \
+                "${BUNDLE_DIR}" "${STAGING_CONFIG_FILE}" --pull
+              status=preflight-passed
+              ;;
+            deploy)
+              "${TOOLING_DIR}/scripts/staging-deploy.sh" \
+                "${BUNDLE_DIR}" "${STAGING_CONFIG_FILE}"
+              status=healthy
+              ;;
+            bootstrap)
+              "${TOOLING_DIR}/scripts/staging-deploy.sh" \
+                "${BUNDLE_DIR}" "${STAGING_CONFIG_FILE}" --bootstrap
+              status=healthy
+              ;;
+            initialize-fleet-metrics)
+              "${TOOLING_DIR}/scripts/staging-deploy.sh" \
+                "${BUNDLE_DIR}" "${STAGING_CONFIG_FILE}" \
+                --initialize-fleet-metrics
+              status=healthy
+              ;;
+            *)
+              printf 'Invalid staging operation: %s\n' "${OPERATION}" >&2
+              exit 1
+              ;;
+          esac
+
+          "${TOOLING_DIR}/scripts/create-staging-operation-evidence.py" \
+            --bundle "${BUNDLE_DIR}" \
+            --output "${EVIDENCE_DIR}" \
+            --operation "${OPERATION}" \
+            --status "${status}" \
+            --tooling-commit "${TOOLING_COMMIT}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --bundle-checksums-sha256 "${BUNDLE_CHECKSUM}"
+          "${TOOLING_DIR}/scripts/verify-staging-operation-evidence.py" \
+            "${EVIDENCE_DIR}"
+
+          evidence_checksum="$(sha256sum "${EVIDENCE_DIR}/SHA256SUMS" | cut -d' ' -f1)"
+          evidence_artifact="staging-operation-evidence-${RELEASE_TAG}-${OPERATION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'evidence_artifact_name=%s\n' "${evidence_artifact}" >>"${GITHUB_OUTPUT}"
+          printf 'evidence_checksums_sha256=%s\n' "${evidence_checksum}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload the verified non-secret operation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.operate.outputs.evidence_artifact_name }}
+          path: ${{ steps.workspace.outputs.evidence }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Remove the private operation workspace
+        if: always()
+        shell: bash
+        env:
+          OPERATION_ROOT: ${{ steps.workspace.outputs.root }}
+        run: |
+          set -euo pipefail
+          case "${OPERATION_ROOT}" in
+            "${RUNNER_TEMP}"/dns-staging.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*)
+              rm -rf -- "${OPERATION_ROOT}"
+              ;;
+            *)
+              printf '%s\n' 'Refusing to remove an unexpected operation path.' >&2
+              exit 1
+              ;;
+          esac
+
+  verify-staging-evidence:
+    name: Verify staging operation evidence
+    needs:
+      - prepare-staging-tooling
+      - prepare-staging-bundle
+      - operate-private-staging
+    if: github.repository == 'AishV05/DNSResolver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - name: Create a fresh verification workspace
+        id: workspace
         shell: bash
         run: |
           set -euo pipefail
-          evidence="${RUNNER_TEMP}/staging-deployment-evidence"
-          mkdir -p "${evidence}"
-          cp "${RUNNER_TEMP}/staging-deployment/staging-deployment-manifest.json" \
-            "${evidence}/"
-          cp "${RUNNER_TEMP}/staging-deployment/SHA256SUMS" "${evidence}/"
-          python3 - "${evidence}/deployment-result.json" <<'PY'
+          umask 077
+          root="$(mktemp -d "${RUNNER_TEMP}/staging-evidence.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          mkdir -m 700 "${root}/evidence" "${root}/tooling"
+          printf 'evidence=%s\n' "${root}/evidence" >>"${GITHUB_OUTPUT}"
+          printf 'tooling=%s\n' "${root}/tooling" >>"${GITHUB_OUTPUT}"
+
+      - name: Download the exact operation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.operate-private-staging.outputs.evidence_artifact_name }}
+          path: ${{ steps.workspace.outputs.evidence }}
+
+      - name: Download the exact trusted-main tooling handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare-staging-tooling.outputs.tooling_artifact_name }}
+          path: ${{ steps.workspace.outputs.tooling }}
+
+      - name: Verify the operation assertion and expected workflow identity
+        shell: bash
+        env:
+          EVIDENCE_CHECKSUM: ${{ needs.operate-private-staging.outputs.evidence_checksums_sha256 }}
+          EVIDENCE_DIR: ${{ steps.workspace.outputs.evidence }}
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_TAG: ${{ needs.prepare-staging-tooling.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.prepare-staging-tooling.outputs.source_commit }}
+          TOOLING_CHECKSUM: ${{ needs.prepare-staging-tooling.outputs.tooling_checksums_sha256 }}
+          TOOLING_COMMIT: ${{ needs.prepare-staging-tooling.outputs.tooling_commit }}
+          TOOLING_DIR: ${{ steps.workspace.outputs.tooling }}
+        run: |
+          set -euo pipefail
+          for directory in "${EVIDENCE_DIR}" "${TOOLING_DIR}"; do
+            [[ -d "${directory}" && ! -L "${directory}" ]] || {
+              printf '%s\n' 'A downloaded verification directory is unsafe.' >&2
+              exit 1
+            }
+            if find "${directory}" -type l -print -quit | grep -q .; then
+              printf '%s\n' 'A downloaded verification artifact contains a symbolic link.' >&2
+              exit 1
+            fi
+          done
+          evidence_actual="$(sha256sum "${EVIDENCE_DIR}/SHA256SUMS" | cut -d' ' -f1)"
+          tooling_actual="$(sha256sum "${TOOLING_DIR}/SHA256SUMS" | cut -d' ' -f1)"
+          [[ "${evidence_actual}" == "${EVIDENCE_CHECKSUM}" ]] || {
+            printf '%s\n' 'Operation evidence checksum differs.' >&2
+            exit 1
+          }
+          [[ "${tooling_actual}" == "${TOOLING_CHECKSUM}" ]] || {
+            printf '%s\n' 'Evidence verifier tooling checksum differs.' >&2
+            exit 1
+          }
+          (cd "${TOOLING_DIR}" && sha256sum --check --strict SHA256SUMS)
+
+          chmod 755 "${TOOLING_DIR}/release" "${TOOLING_DIR}/scripts"
+          chmod 644 \
+            "${TOOLING_DIR}/SHA256SUMS" \
+            "${TOOLING_DIR}/staging-tooling-manifest.json" \
+            "${TOOLING_DIR}"/release/*.json \
+            "${TOOLING_DIR}/scripts/provision-policy-reader.py"
+          chmod 755 \
+            "${TOOLING_DIR}/scripts/create-staging-operation-evidence.py" \
+            "${TOOLING_DIR}/scripts/provision-fleet-metrics-reader.py" \
+            "${TOOLING_DIR}/scripts/provision-resolver-agent.py" \
+            "${TOOLING_DIR}/scripts/staging-backup.sh" \
+            "${TOOLING_DIR}/scripts/staging-common.sh" \
+            "${TOOLING_DIR}/scripts/staging-deploy.sh" \
+            "${TOOLING_DIR}/scripts/staging-preflight.sh" \
+            "${TOOLING_DIR}/scripts/staging-smoke.py" \
+            "${TOOLING_DIR}/scripts/validate-json-schema.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-compose-config.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-deployment-bundle.sh" \
+            "${TOOLING_DIR}/scripts/verify-staging-operation-evidence.py" \
+            "${TOOLING_DIR}/scripts/verify-staging-tooling-handoff.sh"
+          "${TOOLING_DIR}/scripts/verify-staging-tooling-handoff.sh" \
+            "${TOOLING_DIR}"
+          "${TOOLING_DIR}/scripts/verify-staging-operation-evidence.py" \
+            "${EVIDENCE_DIR}"
+          bundle_checksum="$(sha256sum "${EVIDENCE_DIR}/bundle-SHA256SUMS" | cut -d' ' -f1)"
+
+          python3 - \
+            "${EVIDENCE_DIR}/deployment-result.json" \
+            "${RELEASE_TAG}" "${SOURCE_COMMIT}" "${TOOLING_COMMIT}" \
+            "${OPERATION}" "${bundle_checksum}" \
+            "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" <<'PY'
           import json
-          import os
           from pathlib import Path
           import sys
 
-          value = {
-              "schemaVersion": 1,
-              "environment": "staging",
-              "releaseTag": os.environ["RELEASE_TAG"],
-              "sourceCommit": os.environ["SOURCE_COMMIT"],
-              "workflowRunId": int(os.environ["GITHUB_RUN_ID"]),
-              "workflowRunAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-              "status": "healthy",
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise SystemExit(f"duplicate JSON field: {key}")
+                  value[key] = item
+              return value
+
+          result = json.loads(
+              Path(sys.argv[1]).read_text(encoding="utf-8"),
+              object_pairs_hook=unique,
+          )
+          tag, source, tooling, operation, bundle, run_id, attempt = sys.argv[2:]
+          expected_status = "preflight-passed" if operation == "preflight" else "healthy"
+          expected = {
+              "tag": tag,
+              "sourceCommit": source,
+              "toolingCommit": tooling,
+              "operation": operation,
+              "status": expected_status,
+              "bundleChecksumsSha256": bundle,
+              "workflowRunId": int(run_id),
+              "workflowRunAttempt": int(attempt),
           }
-          with Path(sys.argv[1]).open(
-              "w",
-              encoding="utf-8",
-              newline="\n",
-          ) as destination:
-              destination.write(json.dumps(value, indent=2) + "\n")
+          for name, value in expected.items():
+              if result.get(name) != value:
+                  raise SystemExit(f"operation evidence differs for {name}")
           PY
 
-      - name: Upload deployment evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: staging-deployment-evidence-${{ needs.prepare-staging-bundle.outputs.release_tag }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/staging-deployment-evidence
-          if-no-files-found: error
-          retention-days: 90
+      - name: Summarize the verified staging assertion
+        shell: bash
+        env:
+          EVIDENCE_CHECKSUM: ${{ needs.operate-private-staging.outputs.evidence_checksums_sha256 }}
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_TAG: ${{ needs.prepare-staging-tooling.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.prepare-staging-tooling.outputs.source_commit }}
+          TOOLING_COMMIT: ${{ needs.prepare-staging-tooling.outputs.tooling_commit }}
+        run: |
+          set -euo pipefail
+          {
+            printf '### Verified private-staging operation assertion\n\n'
+            printf -- '- Release: `%s` (`%s`)\n' "${RELEASE_TAG}" "${SOURCE_COMMIT}"
+            printf -- '- Operation: `%s`\n' "${OPERATION}"
+            printf -- '- Trusted tooling: `%s`\n' "${TOOLING_COMMIT}"
+            printf -- '- Evidence SHA256SUMS digest: `%s`\n' "${EVIDENCE_CHECKSUM}"
+            printf '\nThis verifies the approved host job assertion; external host and environment controls still require operator review.\n'
+          } >>"${GITHUB_STEP_SUMMARY}"

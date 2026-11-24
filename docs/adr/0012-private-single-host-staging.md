@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted; transport boundary amended by ADR 0013 and policy boundary amended
-by ADR 0019
+Accepted; transport boundary amended by ADR 0013, policy boundary amended by
+ADR 0019, and workflow trust boundary amended by ADR 0032
 
 ## Context
 
@@ -41,7 +41,7 @@ release contract.
 
 ## Network boundary
 
-The staging topology uses four bridge networks:
+The staging topology uses five bridge networks:
 
 - `dns-egress` is the DNS server's only non-internal network. It permits the
   recursive resolver to reach authoritative DNS servers.
@@ -50,6 +50,9 @@ The staging topology uses four bridge networks:
   Grafana.
 - `policy-distribution` is internal and contains only the DNS server and Admin
   API. PostgreSQL does not join this network.
+- `admin-observability` is internal and contains only the Admin API and
+  Prometheus. It carries the authenticated, aggregate fleet-metrics scrape and
+  does not expose per-resolver identity labels.
 
 Only the DNS UDP and TCP listeners are reachable beyond host loopback. Their
 port mappings require `STAGING_DNS_BIND_ADDRESS`, which must be assigned to a
@@ -82,8 +85,10 @@ directory. Compose grants each service only its required secret file:
   support.
 - Grafana reads `grafana-admin-password` through its file-backed environment
   setting.
-- The DNS server reads a dedicated, newline-free
-  `policy-snapshot-reader-token`; no other service receives that file.
+- The DNS server reads dedicated, newline-free policy-snapshot and
+  resolver-agent tokens; no other service receives those files.
+- Prometheus alone reads the newline-free fleet-metrics-reader token used for
+  its authenticated Admin API scrape.
 
 The host-side acceptance probe reads a separate `admin-operator-token` to
 prove authenticated Admin API access. That token stays on the host and is not
@@ -100,9 +105,10 @@ The bootstrap administrator is a separate first-start operation.
 targeted as `dns.admin.bootstrap.token`. It is used only while initializing an
 empty database. The deployer starts PostgreSQL and the Admin API first, uses
 the bootstrap administrator to create or validate the single-purpose
-`POLICY_SNAPSHOT_READER`, issues and verifies its token, writes that token as a
-Compose source inside the owner-only secret directory, and then starts
-required-mode DNS without the bootstrap overlay. Once the stack is healthy,
+`POLICY_SNAPSHOT_READER`, registered resolver agent, and
+`FLEET_METRICS_READER`, issues and verifies their separate tokens, writes those
+tokens as Compose sources inside the owner-only secret directory, and then
+starts required-mode DNS without the bootstrap overlay. Once the stack is healthy,
 the operator creates a distinct,
 expiring administrator token, saves its one-time raw value as the owner-only
 host `admin-operator-token`, verifies it, revokes the bootstrap token, reapplies
@@ -137,18 +143,25 @@ archive and expected schema without touching the live volume. An application
 rollback across an incompatible Flyway migration also requires operator review
 rather than automatic execution.
 
-The optional manual-dispatch workflow targets only a dedicated self-hosted
-runner labelled `dns-staging`. It remains dormant until the operator registers
-that private Linux/AMD64 runner and protects the `staging` GitHub environment.
+The optional manual-dispatch workflow targets only the named `dns-staging`
+runner group and its dedicated self-hosted runner labels. It remains dormant
+until the operator registers that private Linux/AMD64 runner and protects the
+`staging` GitHub environment. The workflow is dispatched from canonical
+`main`: the selected immutable tag supplies application data, while a separate
+checksummed handoff from the trusted workflow commit supplies the only tooling
+executed on the persistent host. The host does not check out the release tag
+or repository source. See ADR 0032 for the complete promotion and evidence
+boundary.
 No cloud OIDC trust, Systems Manager, SSH connectivity, or off-host backup
 storage is assumed. Repository validation must not imply that a generated or
 locally rehearsed deployment reached a remote host.
 
 ## Known staging limitations
 
-- The Admin API publishes snapshots but receives no per-resolver
-  acknowledgement; its status cannot claim a particular DNS instance has
-  applied a revision. DNS exposes its own loaded revision and sync health.
+- Fleet convergence is based on authenticated, server-received reports from
+  registered resolvers and a finite freshness window. It is not a synchronous
+  acknowledgement protocol and does not prove that an unregistered or stale
+  process is absent.
 - Policy distribution uses plain HTTP only on the isolated internal bridge and
   therefore must not be routed onto a shared or untrusted network without TLS
   or mTLS.

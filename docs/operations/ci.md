@@ -56,11 +56,15 @@ the attach mechanism available; CI uses Temurin 17. Any discovered input must
 be reduced into the deterministic adversarial corpus before the fix is closed.
 
 `validate-compose.sh` checks the local and private-staging Compose models,
-Prometheus configuration and rules, release schemas, SPDX normalization,
-GitHub Release recovery logic, the deterministic DNS staging probe, staging
-bundle tamper rejection, and backup-evidence validation. It uses generated
-fixtures and does not print or require a completed `config/local.env`, deploy a
-release, query public DNS, or restore a live database.
+Prometheus configuration and rules, release schemas, SPDX normalization, the
+deterministic DNS staging probe, staging bundle tamper rejection, and
+backup-evidence validation. Its hermetic immutable-release regressions exercise
+the real nine-asset creator and verifier, publisher conflict and recovery
+logic, and the complete final verifier against simulated GitHub responses. It
+uses generated fixtures and does not print or require a completed
+`config/local.env`, deploy or publish a release, query public DNS, or restore a
+live database.
+
 `compose-smoke.sh` requires Docker and exercises a temporary local stack. It
 provisions least-privilege policy-reader, resolver-agent, and fleet-metrics
 identities, verifies both Prometheus targets, and checks session leasing plus
@@ -80,6 +84,26 @@ SMOKE_DNS_PORT=25354 SMOKE_ADMIN_PORT=28081 \
   ./scripts/compose-smoke.sh
 ```
 
+Before creating a release tag, refresh `origin/main` and run the separate
+read-only readiness gate:
+
+```bash
+git fetch --prune origin
+./scripts/preflight-release.py v0.1.0
+```
+
+It requires the local, live remote, and GitHub Actions identity to agree on the
+exact commit; the three release environments `ghcr-publish`,
+`ghcr-attest`, and `github-release` to exist; `main` to report protected; and
+at least one repository ruleset to exist. It fails closed when Git or the
+GitHub API is unavailable. It does not require `gh`, create the tag, or claim
+that the detailed environment protections and other repository settings are
+configured. The separate `staging` environment and private runner are
+downstream deployment prerequisites and do not block the immutable release.
+Confirm the external release controls it prints using the [release
+runbook](releases.md). A successful machine check is not an overall release
+go/no-go decision.
+
 ## GitHub workflows and triggers
 
 | Workflow file | Runs when | Purpose |
@@ -88,9 +112,10 @@ SMOKE_DNS_PORT=25354 SMOKE_ADMIN_PORT=28081 \
 | `.github/workflows/dependency-review.yml` | Pull requests targeting `main` | Blocks introduction of dependency vulnerabilities at the configured severity. |
 | `.github/workflows/codeql.yml` | Pull requests, `main`, a weekly schedule, and manual dispatch | CodeQL analysis for `java-kotlin` and `actions`. |
 | `.github/workflows/stack-smoke.yml` | `main`, scheduled, and manual dispatch | Full disposable Compose smoke; deliberately not a normal PR job. |
+| `.github/workflows/release-rehearsal.yml` | Manual dispatch from `main` with an unused strict SemVer identity | Runs the full local gates, builds the real bundle twice under a disposable local tag, and independently verifies short-lived evidence without publication authority. |
 | `.github/workflows/release-verify.yml` | Strict `vMAJOR.MINOR.PATCH` tag push, or manual verification of an existing annotated tag | Rebuilds the release bundle twice and proves its deterministic release identity; read-only and non-publishing. |
-| `.github/workflows/release-publish.yml` | Strict `vMAJOR.MINOR.PATCH` tag push | Builds and scans release images, publishes and attests exact GHCR digests, requires the independent deterministic release run, then waits separately for `github-release` to publish and verify the permanent immutable nine-asset handoff. |
-| `.github/workflows/staging-deploy.yml` | Manual dispatch from an existing immutable release tag | Verifies the permanent release, prepares a digest-only handoff on a hosted runner, then deploys through the protected `staging` environment to a dedicated private self-hosted runner. |
+| `.github/workflows/release-publish.yml` | Strict `vMAJOR.MINOR.PATCH` tag push | Builds and compares the publication bundle twice, builds and scans release images, publishes and attests exact GHCR digests, requires the independent deterministic release run, then waits separately for `github-release` to publish and verify the permanent immutable nine-asset handoff. |
+| `.github/workflows/staging-deploy.yml` | Manual dispatch from `main` with an existing immutable release tag as data input | Defaults to a non-mutating preflight, prepares separate release-data and trusted-main tooling handoffs on a hosted runner, operates through the protected `staging` environment, then verifies the host assertion on another hosted runner. |
 
 The expected required pull-request checks are exactly:
 
@@ -140,30 +165,62 @@ The publishing workflow accepts no branch, pull request, schedule, or manual
 source-ref input. The read-only verification workflow may be manually given the
 name of an existing annotated tag; it cannot publish. In both paths, a strict
 annotated SemVer tag must identify a clean commit reachable from canonical
-`origin/main`. In `release-publish.yml`, package publication pauses at the
-protected `ghcr-publish` environment and keyless signing pauses independently
-at the protected `ghcr-attest` environment. Permanent handoff then requires the
-exact successful `Release verify` push run for the same tag and commit before a
-third protected environment, `github-release`, can publish anything.
+`origin/main`. In `release-publish.yml`, package publication first requires the
+exact successful `Release verify` push run for the same tag and commit, then
+pauses at the protected `ghcr-publish` environment. Keyless signing pauses
+independently at the protected `ghcr-attest` environment. The independently
+verified signed evidence and exact verification-run identity are both hard
+dependencies before a third protected environment, `github-release`, can
+publish anything.
 
-Only the image-publication job receives package-write permission. Only the
-attestation job receives OIDC and attestation-write permission; it has no
-source checkout and runs no repository code. The final verification job is
-read-only and verifies the exact digest receipt, SPDX predicates, signer
+Only the image-publication job can write the application manifests and their
+two permitted aliases. The separately protected attestation job also receives
+package-write permission solely to attach OCI referrers; it is the only job
+with OIDC and attestation-write permission, has no source checkout, and runs no
+repository code. The final verification job is read-only and verifies the exact
+digest receipt, explicit SLSA provenance v1 and SPDX 2.3 predicates, signer
 workflow, source tag and commit, and GitHub-hosted runner through both GitHub's
-attestation service and GHCR OCI referrers. Only the GitHub Release job receives
+attestation service and GHCR OCI referrers. Before the signer can write an
+attestation, its inline verifier semantically binds both SBOM files and their
+hashes to the expected manifest, tag, commit, repositories, and image digests.
+Only the GitHub Release job receives
 `contents: write`; it receives no package, OIDC, attestation, deployment, or
-stored-secret authority. Post-publication verification requires GitHub's
-immutable flag and automatic release and per-asset attestations. Detailed
-operator steps and repository-plan prerequisites are in
+stored-secret authority. Before it executes the single-purpose publisher, it
+independently fetches that helper from the canonical repository at the exact
+tagged commit, validates the Git object and byte identity, and semantically
+checks the exact nine regular assets, global checksums, tag, commit, and asset
+manifest. Post-publication verification has only `contents: read`,
+`packages: read`, and `attestations: read`; it does not receive `actions: read`.
+It requires GitHub's immutable flag and automatic release and per-asset
+attestations. Detailed operator steps and repository-plan prerequisites are in
 [the release runbook](releases.md).
 
+The separate first-release rehearsal is a pre-tag confidence gate, not a
+publisher. It can be dispatched only from canonical `main`, creates its tag only
+inside a disposable hosted checkout, and has no environment, self-hosted runner,
+registry login, OIDC, attestation, package, release, or deployment authority.
+Its second read-only job verifies both complete bundles and the canonical
+`local-rehearsal-passed` evidence. The result keeps every external GitHub and
+staging prerequisite marked `unverified` and cannot replace the real pre-push
+check or operator go/no-go review.
+
 The staging workflow is also outside the pull-request boundary and is never a
-required merge check. It must be dispatched from the same release tag supplied
-as input. Its hosted preparation job is read-only; the protected deployment job
-runs only on a dedicated `dns-staging` runner and has package-read access, not
-package-write, contents-write, OIDC, or cloud credentials. Host configuration
-and file-mounted runtime secrets never enter GitHub artifacts or contexts. See
+required merge check. It must be dispatched from canonical `main`; the input
+tag selects immutable release data but never supplies code executed on the
+persistent host. Isolated hosted preparation jobs upload the checksum-bound
+trusted-main tooling artifact before a different runner uses the same
+trusted-main verifier and assembler to read allowlisted release-tree blobs and
+create the release-data artifact. No release-tag script is executed. The
+protected job has no repository checkout
+or contents permission and runs only on the named `dns-staging` runner group
+with the exact private-host labels. Raw registry credentials are unset before
+the tooling runs. Its default operation is non-mutating `preflight`; deploy,
+bootstrap, and fleet-metrics initialization are explicit choices. A final
+hosted job has only `actions: read` and verifies the canonical operation
+evidence. Host configuration and file-mounted runtime secrets never enter
+GitHub artifacts or contexts. Those staging controls become relevant only
+after an immutable release exists; their absence must not block the release
+workflow. See
 [the staging runbook](staging.md) for the external host, runner, firewall,
 environment-protection, backup, and rollback requirements.
 
@@ -192,7 +249,10 @@ in GitHub before making the checks merge requirements:
 7. Before the first release tag, enable **Release immutability** and create the
    separately protected `ghcr-publish`, `ghcr-attest`, and `github-release`
    environments exactly as described in the release runbook. These controls
-   cannot be created or proven by tracked workflow YAML.
+   cannot be created or proven by tracked workflow YAML. Confirm release
+   immutability, all three environments' protection rules, and repository-plan
+   eligibility in GitHub; until they are confirmed, a real release remains
+   blocked. No actual `v0.1.0` release has been published by this work.
 
 The workflows deliberately use `pull_request`, not `pull_request_target`, when
 they build or scan pull-request code. Fork and Dependabot runs have read-only

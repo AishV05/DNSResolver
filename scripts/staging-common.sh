@@ -16,6 +16,27 @@ staging_require_command() {
         || staging_fail "required command is unavailable: $1"
 }
 
+staging_reject_inherited_container_controls() {
+    local name
+    local -a rejected=()
+
+    while IFS= read -r name; do
+        case "${name}" in
+            DOCKER_CONFIG)
+                # Deliberately allow an operator-selected client configuration
+                # directory for private-registry credentials.
+                ;;
+            DOCKER_*|COMPOSE_*|BUILDKIT_*|BUILDX_*)
+                rejected+=("${name}")
+                ;;
+        esac
+    done < <(compgen -e)
+
+    if (( ${#rejected[@]} > 0 )); then
+        staging_fail "inherited Docker/Compose control environment is not allowed: ${rejected[*]}"
+    fi
+}
+
 staging_prepare_private_directory() {
     local path=$1
     local label=$2
@@ -32,7 +53,7 @@ staging_prepare_private_directory() {
     fi
     [[ -d "${path}" && ! -L "${path}" ]] \
         || staging_fail "${label} path is unavailable or unsafe"
-    chmod 700 -- "${path}"
+    chmod 700 "${path}"
 }
 
 staging_acquire_deployment_lock() {
@@ -627,6 +648,9 @@ PY
         esac
     done <"${values_file}"
     rm -f "${values_file}"
+
+    STAGING_BUNDLE_CONTRACT=${bundle_contract}
+    staging_verify_rendered_compose
 }
 
 staging_clear_compose_environment() {
@@ -681,6 +705,43 @@ staging_compose() {
     )
 }
 
+staging_verify_rendered_compose() {
+    local rendered_config
+    local -a verifier_arguments
+
+    python3 "${STAGING_SCRIPT_DIR}/verify-staging-compose-config.py" \
+        --pre-render "${STAGING_BUNDLE_DIR}" \
+        || staging_fail 'raw Docker Compose source security verification failed'
+
+    rendered_config="$(mktemp "${TMPDIR:-/tmp}/dns-staging-compose.XXXXXX")"
+    chmod 600 "${rendered_config}"
+    if ! staging_compose config --format json >"${rendered_config}"; then
+        rm -f "${rendered_config}"
+        staging_fail 'Docker Compose could not render the candidate configuration'
+    fi
+
+    verifier_arguments=(
+        "${rendered_config}"
+        "${STAGING_BUNDLE_DIR}"
+        "${STAGING_CFG_SECRETS_DIR}"
+        --dns-address "${STAGING_CFG_DNS_ADDRESS}"
+        --dns-port "${STAGING_CFG_DNS_PORT}"
+        --admin-port "${STAGING_CFG_ADMIN_PORT}"
+        --prometheus-port "${STAGING_CFG_PROMETHEUS_PORT}"
+        --grafana-port "${STAGING_CFG_GRAFANA_PORT}"
+        --contract "${STAGING_BUNDLE_CONTRACT}"
+    )
+    if [[ "${STAGING_USE_BOOTSTRAP}" == true ]]; then
+        verifier_arguments+=(--bootstrap)
+    fi
+    if ! python3 "${STAGING_SCRIPT_DIR}/verify-staging-compose-config.py" \
+            "${verifier_arguments[@]}"; then
+        rm -f "${rendered_config}"
+        staging_fail 'rendered Docker Compose security verification failed'
+    fi
+    rm -f "${rendered_config}"
+}
+
 staging_expected_images() {
     python3 - "${STAGING_BUNDLE_DIR}/staging-deployment-manifest.json" <<'PY'
 import json
@@ -726,6 +787,68 @@ if re.fullmatch(pattern, text) is None:
     raise SystemExit("current deployment state is not one canonical release line")
 print(text[:-1])
 PY
+}
+
+staging_require_forward_promotion() {
+    local target_tag=$1
+    local target_commit=$2
+    local current_key=$3
+    local rejection
+
+    if ! rejection="$(python3 - \
+            "${target_tag}" "${target_commit}" "${current_key}" 2>&1 <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+
+
+target_tag, target_commit, current_key = sys.argv[1:]
+tag_pattern = re.compile(
+    r"v(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+)
+commit_pattern = re.compile(r"[a-f0-9]{40}")
+current_pattern = re.compile(
+    r"(v(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*))-([a-f0-9]{40})"
+)
+
+target_match = tag_pattern.fullmatch(target_tag)
+current_match = current_pattern.fullmatch(current_key)
+if target_match is None or commit_pattern.fullmatch(target_commit) is None:
+    raise SystemExit("candidate release identity is not canonical")
+if current_match is None:
+    raise SystemExit("current release identity is not canonical")
+
+target_version = tuple(int(part) for part in target_match.groups())
+current_version = tuple(int(part) for part in current_match.groups()[1:4])
+current_tag = current_match.group(1)
+current_commit = current_match.group(5)
+rollback_command = (
+    "staging-rollback.sh TARGET_BUNDLE_DIR CONFIG_ENV "
+    "--acknowledge-database-compatibility"
+)
+
+if target_version < current_version:
+    raise SystemExit(
+        f"normal deployment refuses downgrade from {current_tag} to {target_tag}; "
+        f"use {rollback_command} for an intentional rollback"
+    )
+if target_version == current_version and target_commit != current_commit:
+    raise SystemExit(
+        f"normal deployment refuses {target_tag} at a different commit than the "
+        f"recorded immutable tag; use {rollback_command} for an intentional "
+        "rollback to a retained release"
+    )
+PY
+    )"; then
+        [[ -n "${rejection}" ]] \
+            || rejection='release promotion validation did not complete'
+        staging_fail "${rejection}"
+    fi
 }
 
 staging_validate_compose_images() {

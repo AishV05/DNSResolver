@@ -15,7 +15,8 @@ name collision and expose transport-only files such as the Docker image archive.
 
 A permanent release must preserve the earlier evidence relationships, reject
 partial or conflicting reruns, and avoid granting package or OIDC authority to
-the job that writes GitHub Release state.
+the job that writes GitHub Release state. Private staging is a downstream
+consumer of this handoff, not part of the release publication trust boundary.
 
 ## Decision
 
@@ -44,6 +45,14 @@ API and requires the unique successful `Release verify` push run for the same
 tag and full commit. The protected write job re-queries that exact run ID and
 attempt before using `contents: write`.
 
+The write job has no source checkout. Before executing its transferred
+single-purpose publisher helper, it fetches the canonical helper at the exact
+tagged commit through the GitHub contents and Git blob APIs. It reconstructs
+the Git object identity and requires the canonical bytes, transferred bytes,
+and handoff SHA-256 to agree. It then validates the semantic release handoff:
+exactly nine regular files, the global checksum chain, and the asset manifest's
+version, tag, and source commit must all match the workflow identity.
+
 GitHub Release publication uses a draft-first transaction boundary:
 
 1. validate the existing annotated tag through the Git database API;
@@ -69,20 +78,30 @@ attestation with `gh release verify`, verifies every downloaded asset with
 `gh release verify-asset`, and reruns the local, GHCR, and image-attestation
 checks.
 
+The release readiness gate requires the three independent protected
+environments `ghcr-publish`, `ghcr-attest`, and `github-release`. The `staging`
+environment and its private runner are intentionally excluded: they are needed
+only when the immutable release is later deployed and cannot block publication
+of the handoff.
+
 ## Permission boundary
 
 - Evidence preparation has `contents: read` and `actions: read` only.
 - `github-release` has `contents: write` and `actions: read`; it has no package,
   attestation, OIDC, deployment, or stored-secret permission. It performs no
-  source checkout and receives only the nine-file handoff plus a separately
-  checksummed, single-purpose publisher helper.
-- Post-publication verification has read-only contents, packages, actions, and
-  attestations permissions.
+  source checkout and receives only the nine-file handoff plus a checksummed,
+  single-purpose publisher helper independently anchored to the canonical
+  tagged commit.
+- Post-publication verification has only read-only contents, packages, and
+  attestations permissions; it does not receive `actions: read`.
 - All third-party actions remain pinned to full commit IDs, and checkouts do not
   persist credentials.
 
 The `github-release` environment requires a reviewer, prevents self-review,
 disables bypass where supported, permits only `v*` tags, and contains no secret.
+These environment protections and repository release immutability are external
+controls that tracked workflow files cannot prove. They must be confirmed
+manually before the first release; until then, a real release remains blocked.
 
 ## Consequences
 
@@ -99,11 +118,18 @@ attestation bundles, and workflow run identifiers are also excluded. The latter
 are execution evidence checked by the workflow, not reproducible software
 identity.
 
+Hermetic regressions exercise deterministic nine-asset creation and tamper
+rejection, publisher conflict and recovery behavior, and the complete final
+verifier with simulated GitHub responses. That validation neither contacts
+GitHub nor proves that a release exists; no actual `v0.1.0` publication is
+claimed by this decision or its tests.
+
 JAR-specific SBOMs remain out of scope. The two image SBOMs inventory the
 deployed runtime filesystems; a separate direct-JAR distribution SBOM contract
-can be added when that channel becomes independently supported. immutable release does
-not deploy the platform, expose DNS publicly, create cloud infrastructure, or
-make GHCR packages public.
+can be added when that channel becomes independently supported. The immutable
+release does not deploy the platform, expose DNS publicly, create cloud
+infrastructure, or make GHCR packages public. Staging readiness is governed
+separately after publication.
 
 ## References
 
